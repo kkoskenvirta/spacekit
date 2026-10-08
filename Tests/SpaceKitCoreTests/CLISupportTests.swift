@@ -13,38 +13,44 @@ struct PlanRefreshTests {
         FindingItem(path: path, kind: kind, name: PathUtil.lastComponent(path), size: 100)
     }
 
-    @Test("Keeps only items and commands that are still eligible, and the original creation date")
+    /// The plan a fresh evaluation of the job makes from `eligible`, from a scan after the saved one.
+    func fresh(_ eligible: [Finding], trash: Bool = false) -> CleanupPlan {
+        CleanupPlan.make(findings: eligible, trashPreference: trash, scanStarted: Date(timeIntervalSince1970: 2_000))
+    }
+
+    @Test("Keeps only items and commands that are still eligible, and the original scan start")
     func keepsEligible() {
-        let created = Date(timeIntervalSince1970: 1_000)
+        let scanned = Date(timeIntervalSince1970: 1_000)
         let plan = CleanupPlan(
             items: [
-                CleanupItem(path: "/tmp/x/a", size: 100, ruleID: "cache"),
-                CleanupItem(path: "/tmp/x/b", size: 100, ruleID: "cache"),
-                CleanupItem(path: "/tmp/x", kind: .looseFiles, size: 10, ruleID: "cache"),
+                CleanupItem(path: "/tmp/x/a", size: 100, ruleID: "cache", scanStarted: scanned),
+                CleanupItem(path: "/tmp/x/b", size: 100, ruleID: "cache", scanStarted: scanned),
+                CleanupItem(path: "/tmp/x", kind: .looseFiles, size: 10, ruleID: "cache", scanStarted: scanned),
             ],
             commands: [
                 PlannedCommand(ruleID: "tool", arguments: ["brew", "cleanup"], estimatedBytes: 5),
                 PlannedCommand(ruleID: "gone", arguments: ["x", "/tmp/y/c"], estimatedBytes: 5, itemPath: "/tmp/y/c"),
             ],
-            useTrash: false, created: created)
+            useTrash: false)
         let eligible = [
             Finding(rule: rule, items: [item("/tmp/x/a"), item("/tmp/x", kind: .looseFiles)]),
             Finding(rule: toolRule, items: [item("/tmp/t")]),
         ]
 
-        let (refreshed, dropped) = plan.keeping(onlyEligible: eligible)
+        let (refreshed, dropped) = plan.keeping(onlyIn: fresh(eligible))
 
         #expect(refreshed.items.map(\.id) == ["/tmp/x/a", "/tmp/x/*"])
         #expect(refreshed.commands.map(\.ruleID) == ["tool"])
         #expect(dropped.map(\.path) == ["/tmp/x/b"])
-        #expect(refreshed.created == created)
+        #expect(refreshed.items.allSatisfy { $0.scanStarted == scanned })
         #expect(refreshed.useTrash == false)
+        #expect(plan.keeping(onlyIn: fresh(eligible, trash: true)).plan.useTrash, "either plan asking for the Trash wins")
     }
 
     @Test("A folder that is still there but as loose files isn't the same item")
     func kindMatters() {
         let plan = CleanupPlan(items: [CleanupItem(path: "/tmp/x", kind: .directory, size: 1, ruleID: "cache")])
-        let (refreshed, dropped) = plan.keeping(onlyEligible: [Finding(rule: rule, items: [item("/tmp/x", kind: .looseFiles)])])
+        let (refreshed, dropped) = plan.keeping(onlyIn: fresh([Finding(rule: rule, items: [item("/tmp/x", kind: .looseFiles)])]))
         #expect(refreshed.items.isEmpty)
         #expect(dropped.count == 1)
     }
@@ -55,7 +61,10 @@ struct PlanRefreshTests {
             PlannedCommand(ruleID: "cache", arguments: ["x", "/tmp/x/a"], estimatedBytes: 1, itemPath: "/tmp/x/a"),
             PlannedCommand(ruleID: "cache", arguments: ["x", "/tmp/x/b"], estimatedBytes: 1, itemPath: "/tmp/x/b"),
         ])
-        let (refreshed, _) = plan.keeping(onlyEligible: [Finding(rule: rule, items: [item("/tmp/x/b")])])
+        let itemRule = Rule(
+            id: "cache", name: "Cache", paths: ["/tmp/x"], safety: SafetySpec(level: .safe),
+            action: ActionSpec(itemCommand: ["x", "{path}"]))
+        let (refreshed, _) = plan.keeping(onlyIn: fresh([Finding(rule: itemRule, items: [item("/tmp/x/b")])]))
         #expect(refreshed.commands.map(\.itemPath) == ["/tmp/x/b"])
     }
 }
@@ -68,7 +77,7 @@ struct CleanupReportStatusTests {
     @Test("Outcomes answer what happened without a pattern match")
     func outcomePredicates() {
         let outcomes: [CleanupOutcome] = [
-            .removed(bytes: 1, trashedTo: nil), .wouldRemove(bytes: 1), .skipped(reason: "x"), .failed(reason: "y"),
+            .removed(bytes: 1, trashedTo: nil), .wouldRemove(bytes: 1), .skipped(reason: "x", kind: .refused), .failed(reason: "y"),
         ]
         #expect(outcomes.map(\.isRemoved) == [true, false, false, false])
         #expect(outcomes.map(\.isWouldRemove) == [false, true, false, false])
@@ -79,7 +88,7 @@ struct CleanupReportStatusTests {
     @Test("Skipped items alone are not a problem")
     func skippedItems() {
         var report = CleanupReport(dryRun: false)
-        report.items = [(item, .skipped(reason: "Blocked: x"))]
+        report.items = [(item, .skipped(reason: "Blocked: x", kind: .refused))]
         #expect(!report.hasProblems)
         #expect(!report.removedAnything)
     }
@@ -91,7 +100,7 @@ struct CleanupReportStatusTests {
         #expect(failed.hasProblems)
 
         var skippedCommand = CleanupReport(dryRun: false)
-        skippedCommand.commands = [(command, .skipped(reason: "'brew' is not installed"), "")]
+        skippedCommand.commands = [(command, .skipped(reason: "'brew' is not installed", kind: .refused), "")]
         #expect(skippedCommand.hasProblems)
         #expect(skippedCommand.unfinishedCommands.map(\.reason) == ["'brew' is not installed"])
 
@@ -106,8 +115,29 @@ struct CleanupReportStatusTests {
         #expect(warned.removedAnything)
 
         var changed = CleanupReport(dryRun: false)
-        changed.items = [(item, .skipped(reason: CleanupExecutor.changedSinceReview + "This folder is a git repository (source code)"))]
+        changed.items = [(item, .changedSinceReview("This folder is a git repository (source code)"))]
         #expect(changed.hasProblems)
+
+        var notAccepted = CleanupReport(dryRun: false)
+        notAccepted.items = [(item, .notAccepted("No SpaceKit rule recognises this; make sure you don't need it"))]
+        #expect(notAccepted.hasProblems)
+    }
+
+    @Test("Whether a skipped item is a problem comes from its kind, never from its wording")
+    func skipKindDecides() {
+        var lookalike = CleanupReport(dryRun: false)
+        lookalike.items = [(item, .skipped(reason: CleanupExecutor.changedSinceReview + "x", kind: .refused))]
+        #expect(!lookalike.hasProblems)
+        #expect(SkipKind.allCases.filter(\.isProblem) == [.changedSinceReview, .notAccepted])
+    }
+
+    @Test("Skip reasons read as before: the kind's words, then why")
+    func skipWording() {
+        #expect(CleanupOutcome.changedSinceReview("x") == .skipped(reason: "Changed since you reviewed it: x", kind: .changedSinceReview))
+        #expect(CleanupOutcome.notAccepted("y") == .skipped(reason: "Warnings not accepted: y", kind: .notAccepted))
+        #expect(
+            CleanupExecutor.outdatedReview
+                == "Changed since you reviewed it: SpaceKit's settings changed after the review. Review it again.")
     }
 
     @Test("A command that ran counts as removing something even if it freed nothing")
@@ -116,38 +146,6 @@ struct CleanupReportStatusTests {
         report.commands = [(command, .removed(bytes: 0, trashedTo: nil), "")]
         #expect(report.removedAnything)
         #expect(!report.hasProblems)
-    }
-}
-
-@Suite("Manual job run results")
-struct ManualJobRunTests {
-    @Test("A run a front end carried out is recorded like JobRunner.run records its own")
-    func manualResult() throws {
-        let fixture = try RunnerFixture()
-        let job = Job(id: "j", name: "J", rules: ["r"])
-        let evaluation = JobEvaluation(job: job, findings: [], eligible: [])
-        var report = CleanupReport(dryRun: false)
-        report.items = [(CleanupItem(path: "/tmp/a", size: 7), .removed(bytes: 7, trashedTo: nil))]
-        let date = Date(timeIntervalSince1970: 5_000)
-
-        let result = JobRunResult.manual(evaluation, report: report, date: date)
-        try fixture.runner.record(result)
-
-        let state = try #require(fixture.context.jobStates.load()["j"])
-        #expect(state.lastRun == date)
-        #expect(state.lastOutcome == result.summary)
-        if case .cleaned(let recorded) = result.action { #expect(recorded.freedBytes == 7) } else { Issue.record("not cleaned") }
-    }
-
-    @Test("Without a report the run wasn't triggered")
-    func notTriggered() {
-        let job = Job(id: "j", name: "J", rules: ["r"])
-        let result = JobRunResult.manual(JobEvaluation(job: job, findings: [], eligible: []), report: nil)
-        guard case .notTriggered(let reason) = result.action else {
-            Issue.record("expected notTriggered")
-            return
-        }
-        #expect(reason == "Nothing matches the job's conditions")
     }
 }
 

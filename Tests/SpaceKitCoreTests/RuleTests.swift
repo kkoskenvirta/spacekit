@@ -83,7 +83,7 @@ struct RuleTests {
 
     @Test("The built-in library loads without errors")
     func builtinLibrary() throws {
-        let library = RuleLibrary.load(directories: [])
+        let library = RuleLibrary.load(builtin: .embedded, directories: [])
         #expect(library.rules.count > 10)
         let errors = library.issues.filter { $0.severity == .error }
         #expect(errors.isEmpty, "\(errors.map(\.description).joined(separator: "\n"))")

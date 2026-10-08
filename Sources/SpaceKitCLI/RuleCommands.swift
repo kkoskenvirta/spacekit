@@ -41,7 +41,7 @@ struct RulesCommand: ParsableCommand {
             print()
             print(
                 "\(rules.count) rules · ".dim
-                    + "built-in: \(RuleLibrary.builtinDirectory.map(Output.path) ?? "not found")".dim)
+                    + "built-in: \(Output.safe(BuiltinRules.standard.origin))".dim)
             for issue in context.library.issues where issue.severity == .error { Output.warn(Output.safe(issue.description)) }
         }
     }
@@ -65,9 +65,13 @@ struct RulesCommand: ParsableCommand {
     }
 
     struct Validate: ParsableCommand {
-        static let configuration = CommandConfiguration(abstract: "Validate rule files (default: every loaded rule).")
+        static let configuration = CommandConfiguration(
+            abstract: "Validate rule files (default: every loaded rule).",
+            discussion: "Files are judged as your own rules, including whether a rule with a built-in id only narrows it.")
         @OptionGroup var global: GlobalOptions
         @Argument(help: "Rule files to check.") var files: [String] = []
+        @Flag(name: .long, help: "Judge the files as built-in rules (for a file in the repository's rules/ folder).")
+        var builtin = false
 
         func run() throws {
             var issues: [RuleIssue] = []
@@ -77,23 +81,9 @@ struct RulesCommand: ParsableCommand {
                 issues = library.issues
                 count = library.rules.count
             } else {
-                var rules: [Rule] = []
-                let builtin = RuleLibrary.builtinDirectory.map(PathUtil.standardize)
-                for file in files.map({ PathUtil.expandArgument($0) }) {
-                    do {
-                        // Rules in the built-in folder are judged as built-in, which decides the commands they may run.
-                        let isBuiltin = builtin.map { PathUtil.isStrictAncestor($0, of: file) } ?? false
-                        rules += try RuleLibrary.parse(yaml: try String(contentsOfFile: file, encoding: .utf8), source: file).map { rule in
-                            var rule = rule
-                            rule.isBuiltin = isBuiltin
-                            return rule
-                        }
-                    } catch {
-                        issues.append(RuleIssue(severity: .error, source: file, message: DecodingErrorText.describe(error)))
-                    }
-                }
-                count = rules.count
-                issues += RuleLibrary(rules: rules).validate()
+                let checked = RuleLibrary.check(files: files.map { PathUtil.expandArgument($0) }, asBuiltin: builtin)
+                issues = checked.issues
+                count = checked.rules.count
             }
             for issue in issues {
                 let text = Output.safe(issue.description)
@@ -149,7 +139,7 @@ struct RulesCommand: ParsableCommand {
 
         func run() throws {
             let context = global.loadContext()
-            print("built-in: \(RuleLibrary.builtinDirectory.map(Output.safe) ?? "not found")")
+            print("built-in: \(Output.safe(BuiltinRules.standard.origin))")
             for directory in context.ruleDirectories {
                 let missing = FileManager.default.fileExists(atPath: directory) ? "" : " (not created yet)".dim
                 print("user:     \(Output.safe(directory))" + missing)

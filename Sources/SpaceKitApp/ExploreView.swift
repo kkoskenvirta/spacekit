@@ -356,7 +356,7 @@ struct SelectionInspector: View {
                     Button("Add to List", systemImage: "plus.circle") { model.addToCleanupList([cleanup]) }
                         .disabled(model.isInCleanupList(item.path))
                     Button("Move to Trash…", systemImage: "trash", role: .destructive) {
-                        model.review(model.manualPlan([cleanup]), title: "Remove \(item.name)")
+                        model.review(CleanupPlan(items: [cleanup]), title: "Remove \(item.name)")
                     }
                 }
             }

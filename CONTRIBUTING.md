@@ -38,14 +38,18 @@ export SPACEKIT_HOME=$SPACEKIT_SANDBOX/home SPACEKIT_CONFIG=$SPACEKIT_SANDBOX/co
 
 ## Adding or fixing a rule
 
+Built-in rules are compiled into SpaceKit: the `EmbedRules` build plugin ([`Plugins/EmbedRules`](Plugins/EmbedRules)) turns every `rules/**/*.yaml` into Swift source for `SpaceKitCore` on each build, so an edit takes effect when you rebuild, and nothing reads `rules/` at run time.
+
 1. Find the right file in [`rules/`](rules), or add one (`rules/<area>/<tool>.yaml`).
 2. Follow [docs/RULES.md](docs/RULES.md). Be precise about paths, honest about safety, and say in the description what happens if it's removed.
 3. Validate and try it:
    ```sh
-   swift run spacekit rules validate rules/developer/mytool.yaml
+   swift run spacekit rules validate --builtin rules/developer/mytool.yaml   # this file, judged as a built-in rule
+   swift run spacekit rules validate                # rebuilds, then checks every built-in rule and your own
    swift run spacekit dev --rule mytool.cache --items 20
    swift run spacekit clean mytool.cache          # preview only; nothing is removed without --yes
    ```
+   `swift test` fails when any built-in rule doesn't parse or has an error (`BuiltinRulesTests`). In a debug build, `SPACEKIT_RULES_DIR=<folder>` replaces the compiled-in rules with that folder's, to try edits without rebuilding; release builds ignore it.
 4. In the PR, say which tool versions and macOS version you checked the paths on.
 
 ## Code
@@ -54,7 +58,7 @@ export SPACEKIT_HOME=$SPACEKIT_SANDBOX/home SPACEKIT_CONFIG=$SPACEKIT_SANDBOX/co
 - **Performance matters.** The scanner and the rule engine run over millions of entries. Measure before and after (release builds: `swift build -c release`), and prefer incremental updates over recomputation (see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)).
 - **Core stays UI-free.** `SpaceKitCore` must not import AppKit or SwiftUI, so the CLI, TUI and agent share it.
 - **Style.** Swift 6 language mode, strict concurrency, `swift-format` (`make lint`, `make format`). Match the surrounding code; comments explain *why*.
-- **Tests** use Swift Testing (`import Testing`). File-system tests use `TempTree` and never touch real user data. Every cleanup test builds its executor with `sandboxExecutor` ([`CleanupExecutionTests.swift`](Tests/SpaceKitCoreTests/CleanupExecutionTests.swift)), which puts the home and the journal inside the `TempTree` and moves "trashed" items into its own `.Trash` with `sandboxTrash` ([`TestSupport.swift`](Tests/SpaceKitCoreTests/TestSupport.swift)), so nothing reaches your real Trash. The one test of the executor a `SpaceKitContext` builds sets its `trash` to `sandboxTrash` instead, and tests that move items to a Trash themselves use `sandboxTrash` too. Tests that change the umask do it through `withUmask`, because the umask is shared by every test running at the same time.
+- **Tests** use Swift Testing (`import Testing`). File-system tests use `TempTree` and never touch real user data. Every cleanup test builds its executor with `sandboxExecutor` ([`CleanupExecutionTests.swift`](Tests/SpaceKitCoreTests/CleanupExecutionTests.swift)), which puts the home and the journal inside the `TempTree` and moves "trashed" items into its own `.Trash` with `sandboxTrash` ([`TestSupport.swift`](Tests/SpaceKitCoreTests/TestSupport.swift)), so nothing reaches your real Trash. Tests that run the executor a `SpaceKitContext` builds set its `trash` to `sandboxTrash` first, and tests that move items to a Trash themselves use `sandboxTrash` too. Tests that change the umask do it through `withUmask`, because the umask is shared by every test running at the same time.
 
 ## UI screenshots (debug builds)
 

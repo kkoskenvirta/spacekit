@@ -49,23 +49,54 @@ struct RunnerFixture {
 
 @Suite("Job runner")
 struct JobRunnerTests {
-    @Test("Manual runs don't confirm warnings on the person's behalf")
+    @Test("A job's plan run by hand goes through the review: its warnings run only once the person accepts them")
     func manualRunsNeedConfirmation() throws {
         var fixture = try RunnerFixture()
         try fixture.tree.file("home/models/a/weights.bin", bytes: 4096)
         fixture.rules = [fixture.rule("models", "home/models", level: .review)]
         let job = Job(id: "models", name: "Models", rules: ["models"], action: .delete)
+        let runner = fixture.runner
+        let review = CleanupReview(runner.plan(for: try runner.evaluate(job)), executor: runner.executor)
+        #expect(review.needsAcknowledgement)
 
-        let unconfirmed = fixture.runner.run(job, manual: true)
-        guard case .cleaned(let report) = unconfirmed.action else { Issue.record("expected a cleanup"); return }
-        #expect(report.freedBytes == 0)
-        #expect(report.skipped.count == 1)
+        let unconfirmed = runner.executor.execute(review.acknowledge(acceptingWarnings: false), dryRun: false)
+        #expect(unconfirmed.freedBytes == 0)
+        #expect(unconfirmed.skipped.count == 1)
         #expect(FileManager.default.fileExists(atPath: fixture.tree.path("home/models/a")))
 
-        let confirmed = fixture.runner.run(job, manual: true, confirmed: true)
-        guard case .cleaned(let after) = confirmed.action else { Issue.record("expected a cleanup"); return }
-        #expect(after.freedBytes > 0)
+        let confirmed = runner.executor.execute(review.acknowledge(acceptingWarnings: true), dryRun: false)
+        #expect(confirmed.freedBytes > 0)
         #expect(!FileManager.default.fileExists(atPath: fixture.tree.path("home/models/a")))
+    }
+
+    @Test("The agent's log names the built-in rules a person's own rule files replace")
+    func agentNamesOverrides() throws {
+        let fixture = try RunnerFixture()
+        try fixture.tree.directory("rules")
+        let cache = fixture.tree.path("home/cache")
+        let file = fixture.tree.path("rules/cache.yaml")
+        try "id: base.cache\nname: Cache\npath: \(cache)\nsafety: safe\nexclusions: [\"*/keep\"]\naction: remove\n".write(
+            toFile: file, atomically: true, encoding: .utf8)
+        let builtin = BuiltinRules(files: [
+            RuleFileText(
+                source: "built-in rules/base.yaml", yaml: "id: base.cache\nname: Cache\npath: \(cache)\nsafety: safe\naction: remove\n")
+        ])
+        let library = RuleLibrary.load(builtin: builtin, directories: [fixture.tree.path("rules")])
+        #expect(library.overrides.map(\.id) == ["base.cache"])
+
+        var config = fixture.config
+        config.jobs = [Job(id: "cache", name: "Cache", rules: ["base.cache"], mode: .observe)]
+        let context = SpaceKitContext(
+            paths: SpaceKitPaths(configFile: fixture.tree.path("config/config.yaml"), stateDirectory: fixture.stateDirectory),
+            config: config,
+            library: library)
+        let runner = JobRunner(context: context, notifier: fixture.notifier)
+        let start = Date()
+        _ = runner.runDue(now: start)
+        var lines: [String] = []
+        let results = runner.runDue(now: start.addingTimeInterval(30 * 86_400)) { lines.append($0) }
+        #expect(results.count == 1)
+        #expect(lines.contains { $0.contains("base.cache") && $0.contains(PathUtil.abbreviate(file)) }, "\(lines)")
     }
 
     @Test("Automatic runs clean safe items, notify even with notifications off, and record state")
@@ -77,7 +108,10 @@ struct JobRunnerTests {
         let job = Job(id: "build", name: "Build", rules: ["build"], mode: .automatic, action: .delete)
 
         let result = fixture.runner.run(job)
-        guard case .cleaned(let report) = result.action else { Issue.record("expected a cleanup"); return }
+        guard case .cleaned(let report) = result.action else {
+            Issue.record("expected a cleanup")
+            return
+        }
         #expect(report.freedBytes > 0)
         #expect(!FileManager.default.fileExists(atPath: fixture.tree.path("home/build/app")))
         #expect(fixture.notifier.count == 1)
@@ -133,7 +167,10 @@ struct JobRunnerTests {
         #expect(observed.recordError != nil)
 
         let suggested = fixture.runner.run(Job(id: "logs", name: "Logs", rules: ["logs"], mode: .suggest))
-        guard case .failed(let message) = suggested.action else { Issue.record("expected a failure"); return }
+        guard case .failed(let message) = suggested.action else {
+            Issue.record("expected a failure")
+            return
+        }
         #expect(message.contains("suggestion"))
         #expect(fixture.notifier.count == 1)  // only the observe run's
     }

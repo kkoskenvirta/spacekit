@@ -72,7 +72,7 @@ struct RulesView: View {
                         "\(model.library.rules.count) rules describe where tools keep data, how risky it is to remove, and how to clean it."
                 )
                 Text(
-                    "Rules are plain YAML. Add your own in `~/.config/spacekit/rules/`, or contribute to the built-in library in the project's `rules/` folder. A rule with the same id as a built-in one replaces it, unless the built-in rule is “Don't touch” or the replacement would lower its safety level."
+                    "Rules are plain YAML. Add your own in `~/.config/spacekit/rules/`, or contribute to the built-in library in the project's `rules/` folder. A rule with the same id as a built-in one replaces it only to narrow it: add exclusions, raise thresholds or the safety level. It can't add locations, patterns or commands, or replace a “Don't touch” rule."
                 )
                 .foregroundStyle(.secondary)
                 HStack(spacing: 12) {
@@ -140,17 +140,29 @@ private struct RuleDetail: View {
                     .padding(12)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(.background.secondary, in: RoundedRectangle(cornerRadius: 8))
-                if let source = rule.source {
-                    HStack {
-                        Text(PathUtil.abbreviate(source)).font(.caption).foregroundStyle(.secondary)
-                        Button("Reveal") { model.reveal(source) }.buttonStyle(.link).font(.caption)
-                    }
-                }
+                if let source = rule.source { RuleSourceLine(source: source, isBuiltin: rule.isBuiltin) }
                 if rule.safety.level != .protected && rule.action.isCleanable {
                     Button("Automate This Rule…") { model.jobDraft = JobDraft(rule: rule) }
                 }
             }
             .padding(24)
+        }
+    }
+}
+
+/// Where a rule comes from, with a way to show a rule file in Finder.
+private struct RuleSourceLine: View {
+    @Environment(AppModel.self) private var model
+    let source: String
+    let isBuiltin: Bool
+
+    var body: some View {
+        HStack {
+            Text(PathUtil.abbreviate(source)).font(.caption).foregroundStyle(.secondary)
+            // Built-in rules are compiled into SpaceKit; there's no file to reveal.
+            if !isBuiltin {
+                Button("Reveal") { model.reveal(source) }.buttonStyle(.link).font(.caption)
+            }
         }
     }
 }

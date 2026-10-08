@@ -4,11 +4,11 @@ extension ConfigStore {
     /// Applies one change to the config file as it is on disk now, and saves it if it changed. Returns the config
     /// that is on disk afterwards.
     ///
-    /// Front ends that keep a config in memory call this instead of saving their copy, so a change made in the app
-    /// doesn't drop jobs the CLI added since. A file that exists but doesn't parse is never overwritten: the
+    /// Front ends reach it through `SpaceKitContext.applying(_:)` instead of saving their copy, so a change made in the
+    /// app doesn't drop jobs the CLI added since. A file that exists but doesn't parse is never overwritten: the
     /// `ConfigError` is thrown and the person's hand edits stay as they are.
     @discardableResult
-    public func update(_ change: (inout SpaceKitConfig) throws -> Void) throws -> SpaceKitConfig {
+    func update(_ change: (inout SpaceKitConfig) throws -> Void) throws -> SpaceKitConfig {
         try FileLock.withLock(for: file) {
             var config = try load()
             let before = config

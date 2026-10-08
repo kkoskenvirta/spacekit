@@ -21,11 +21,14 @@ struct JobsCommand: ParsableCommand {
     /// Changes the config file as it is on disk now. A file that doesn't parse is never replaced: saving the
     /// defaults loaded in its place would drop protected paths, allowed commands and disabled rules.
     static func updateConfig(_ context: SpaceKitContext, _ change: (inout SpaceKitConfig) throws -> Void) throws {
-        if let error = context.configError {
-            Output.warn("The config file is invalid, so nothing was saved. Fix it first (spacekit config validate): \(Output.safe(error))")
+        do {
+            _ = try context.applying(change)
+        } catch let error as ConfigError {
+            Output.warn(
+                "The config file is invalid, so nothing was saved. Fix it first (spacekit config validate): "
+                    + Output.safe(error.localizedDescription))
             throw ExitCode.failure
         }
-        try context.configStore.update(change)
     }
 
     /// The job, what it matched now and whether it would run.
@@ -105,17 +108,18 @@ struct JobsCommand: ParsableCommand {
             let evaluation = try ProgressReporter.run("Evaluating") { try runner.evaluate(job, progress: $0) }
             let plan = runner.plan(for: evaluation)
             let automation = CleanupContext.automatic(runner.automationContext(for: job))
+            let verdicts = CleanupOutput.Verdicts(plan, executor: runner.executor, context: automation)
             if json {
                 try Output.json(
                     EvaluationJSON(
                         job: job, matchedBytes: evaluation.matchedBytes, eligibleBytes: evaluation.eligibleBytes,
                         triggered: evaluation.isTriggered, status: evaluation.triggerSummary, missingRules: runner.rules(for: job).missing,
-                        plan: PlanJSON(plan: plan, executor: runner.executor, context: automation)))
+                        plan: PlanJSON(verdicts)))
                 return
             }
             JobsCommand.warnMissingRules(job, runner: runner)
             Output.emit(JobsCommand.summaryLines(job, evaluation))
-            Output.emit(CleanupOutput.planLines(plan, executor: runner.executor, context: automation, limit: 25))
+            Output.emit(CleanupOutput.planLines(verdicts, limit: 25))
             print()
             print("✓ = a scheduled run may remove it; ✗ = scheduled runs leave it alone (you can still clean it yourself).".dim)
         }
@@ -175,9 +179,10 @@ struct JobsCommand: ParsableCommand {
             // Check custom folders against the guard up front.
             let automation = CleanupContext.automatic(JobRunner(context: context).automationContext(for: job))
             for folder in job.paths {
-                let verdict = context.safetyGuard.evaluate(path: PathUtil.join(PathUtil.expand(folder), "item"), context: automation)
-                if verdict.isBlocked {
-                    Output.warn(Output.safe("Automatic runs won't clean inside \(folder): \(verdict.reasons.joined(separator: "; "))"))
+                // Something the job might find inside the folder: only where it would be is known yet.
+                let inside = PathUtil.join(PathUtil.expand(folder), "item")
+                if let reasons = context.safetyGuard.locationRefusal(of: inside, rule: nil, context: automation) {
+                    Output.warn(Output.safe("Automatic runs won't clean inside \(folder): \(reasons.joined(separator: "; "))"))
                 }
             }
             var storedID = job.id
@@ -228,15 +233,23 @@ struct JobsCommand: ParsableCommand {
         print("\(Output.safe(id)): \(enabled ? "on" : "off")")
     }
 
-    /// Saves a run's outcome so the job's schedule moves on; a failure to save is reported, not swallowed.
-    static func record(_ result: JobRunResult, runner: JobRunner) -> Bool {
-        do {
-            try runner.record(result)
-            return true
-        } catch {
-            Output.warn(Output.safe("Couldn't save the job's state: \(error.localizedDescription)"))
-            return false
-        }
+    /// Reviews `run`'s plan with `executor`, the context's, and completes the run with that same executor once the person
+    /// said go. `nil` when nothing ran.
+    static func complete(
+        _ run: ManualJobRun, plan: CleanupPlan, executor: CleanupExecutor, acknowledgement: AcknowledgementOptions, json: Bool,
+        heading: String, hint: String
+    ) throws -> ManualJobRun.Outcome? {
+        try CleanupOutput.session(
+            plan, executor: executor, acknowledgement: acknowledgement, json: json, interactive: false, heading: heading, hint: hint,
+            run: { run.complete($0, executor: executor) }, report: \.report)
+    }
+
+    /// Ends a job run or an approval: what couldn't be saved is warned about, and the exit status is nonzero when the
+    /// run left something undone or its state wasn't saved.
+    static func finish(_ outcome: ManualJobRun.Outcome) throws {
+        for error in outcome.saveErrors { Output.warn(Output.safe(error)) }
+        try CleanupOutput.exitIfProblems(outcome.report)
+        if !outcome.saveErrors.isEmpty { throw ExitCode(1) }
     }
 
     struct Run: ParsableCommand {
@@ -244,14 +257,23 @@ struct JobsCommand: ParsableCommand {
             abstract: "Run a job now. Previews by default; --yes cleans; --scheduled behaves exactly like the agent would.",
             discussion: """
                 Without --scheduled the job cleans now, whatever its mode, with the checks of a cleanup you start yourself:
-                the preview lists what will go and any warnings, and --yes confirms them. The exit status is nonzero when
-                anything failed or a warning was raised.
+                the preview lists what will go and any warnings. --yes runs what the guard allows outright; items with
+                warnings also need --accept-warnings. A job below its size threshold is skipped with the reason unless you
+                add --force. The run is recorded as the job's last run. The exit status is nonzero when anything failed, a
+                row's warnings weren't accepted or a warning was raised.
                 """
         )
         @OptionGroup var global: GlobalOptions
         @Argument var id: String
-        @Flag(name: [.short, .long], help: "Clean now, accepting the warnings in the preview.") var yes = false
+        @OptionGroup var acknowledgement: AcknowledgementOptions
+        @Flag(name: .long, help: "Run it even when the job is below its size threshold.") var force = false
         @Flag(name: .long, help: "Follow the job's mode (observe/suggest/automatic) like a scheduled run.") var scheduled = false
+
+        func validate() throws {
+            if force && scheduled {
+                throw ValidationError("--force can't be used with --scheduled, which runs the job as the agent would.")
+            }
+        }
 
         func run() throws {
             let context = global.loadContext()
@@ -262,21 +284,20 @@ struct JobsCommand: ParsableCommand {
                 return
             }
             JobsCommand.warnMissingRules(job, runner: runner)
-            let evaluation = try ProgressReporter.run("Evaluating \(Output.safe(job.name))") { try runner.evaluate(job, progress: $0) }
-            Output.emit(JobsCommand.summaryLines(job, evaluation))
-            guard evaluation.isTriggered else {
-                if yes && !JobsCommand.record(.manual(evaluation, report: nil), runner: runner) { throw ExitCode(1) }
+            let prepared = try ProgressReporter.run("Evaluating \(Output.safe(job.name))") {
+                try ManualJobRun.prepare(job, runner: runner, progress: $0)
+            }
+            Output.emit(JobsCommand.summaryLines(job, prepared.evaluation))
+            let run = force ? prepared.forced() : prepared
+            guard let plan = run.plan else {
+                if run.canForce { print("Run it anyway with --force.".dim) }
                 return
             }
-            guard
-                let report = try CleanupOutput.session(
-                    runner.plan(for: evaluation), executor: runner.executor, yes: yes, json: false, interactive: false,
-                    heading: "What this run removes",
-                    hint: "Preview only. Run with --yes to clean now, or --scheduled to run it the way the agent would.")
-            else { return }
-            let recorded = JobsCommand.record(.manual(evaluation, report: report), runner: runner)
-            try CleanupOutput.exitIfProblems(report)
-            if !recorded { throw ExitCode(1) }
+            let outcome = try JobsCommand.complete(
+                run, plan: plan, executor: context.executor, acknowledgement: acknowledgement, json: false,
+                heading: "What this run removes",
+                hint: "Preview only. Run with --yes to clean now, or --scheduled to run it the way the agent would.")
+            if let outcome { try JobsCommand.finish(outcome) }
         }
 
         private func runScheduled(_ job: Job, runner: JobRunner) throws {
@@ -359,6 +380,9 @@ struct SuggestionsCommand: ParsableCommand {
 
     struct List: ParsableCommand {
         static let configuration = CommandConfiguration(abstract: "List pending suggestions.")
+        /// How many of a suggestion's largest items, and of its problems, the list shows before "… N more".
+        static let listedItems = 5
+        static let listedProblems = 3
         @OptionGroup var global: GlobalOptions
         @Flag(name: .long, help: "Machine-readable output.") var json = false
 
@@ -378,10 +402,12 @@ struct SuggestionsCommand: ParsableCommand {
                     Output.safe(suggestion.id).bold + "  " + Output.safe(suggestion.jobName) + "  "
                         + ByteCount.format(suggestion.plan.totalBytes).bold + "  "
                         + "prepared \(suggestion.created.relativeDescription())".dim)
-                for item in suggestion.plan.items.sorted(by: { $0.size > $1.size }).prefix(5) {
-                    print("    " + Output.size(item.size) + "  " + Output.path(item.path).dim)
-                }
-                if suggestion.plan.items.count > 5 { print("    … \(suggestion.plan.items.count - 5) more".dim) }
+                let items = Excerpt(suggestion.plan.items.sorted(by: { $0.size > $1.size }), first: Self.listedItems)
+                for item in items.shown { print("    " + Output.size(item.size) + "  " + Output.path(item.path).dim) }
+                if let more = items.moreText() { print("    … \(more)".dim) }
+                let problems = Excerpt(suggestion.problems, first: Self.listedProblems)
+                for problem in problems.shown { print("    ! ".fg(ANSI.review) + Output.safe(problem).dim) }
+                if let more = problems.moreText("problems") { print("    … \(more)".dim) }
             }
             print()
             print("Preview one with `spacekit suggestions approve <id>`, or dismiss it with `spacekit suggestions dismiss <id>`.".dim)
@@ -393,53 +419,78 @@ struct SuggestionsCommand: ParsableCommand {
             abstract: "Preview a suggested cleanup; run it with --yes.",
             discussion: """
                 The job is evaluated again first: items used since the suggestion was made, or no longer matching the
-                job's age conditions, are dropped. The suggestion is kept unless the run removed something and nothing
-                failed. The exit status is nonzero when anything failed or a warning was raised.
+                job's age conditions, are dropped. --yes runs what the guard allows outright; items with warnings also
+                need --accept-warnings. Approving records the job's last run. Afterwards the suggestion is dismissed when
+                nothing in it is left to clean (also when nothing in it still met the job's conditions, so nothing ran);
+                otherwise it's kept with what's left and the problems the run hit. The exit status is nonzero when anything
+                failed, a row's warnings weren't accepted or a warning was raised.
                 """
         )
         @OptionGroup var global: GlobalOptions
         @Argument var id: String
-        @Flag(name: [.short, .long], help: "Run the cleanup, accepting the warnings in the preview.") var yes = false
+        @OptionGroup var acknowledgement: AcknowledgementOptions
         @Flag(name: .long, help: "Machine-readable plan and result on stdout; the preview goes to stderr.") var json = false
 
         func run() throws {
             let context = global.loadContext()
             let suggestion = try SuggestionsCommand.find(id, in: context)
-            guard let job = context.config.jobs.first(where: { $0.id == suggestion.jobID }) else {
-                throw ValidationError(
-                    "The job that prepared this suggestion (\(Output.safe(suggestion.jobID))) is no longer in your config, so its conditions can't be "
-                        + "checked. Dismiss it: spacekit suggestions dismiss \(Output.safe(suggestion.id))")
-            }
             let runner = JobRunner(context: context)
-            let evaluation = try ProgressReporter.run("Checking \(Output.safe(job.name))") { try runner.evaluate(job, progress: $0) }
-            let (plan, dropped) = suggestion.plan.keeping(onlyEligible: evaluation.eligible)
+            let dismiss = "spacekit suggestions dismiss \(Output.safe(suggestion.id))"
+            let run: ManualJobRun
+            do {
+                run = try ProgressReporter.run("Checking \(Output.safe(suggestion.jobName))") {
+                    try ManualJobRun.prepare(suggestion, runner: runner, progress: $0)
+                }
+            } catch let missing as ManualJobRun.JobMissing {
+                throw ValidationError(Output.safe(missing.localizedDescription) + " Run: " + dismiss)
+            }
             var notes = [
                 Output.safe(suggestion.jobName).bold + "  ·  " + "prepared \(suggestion.created.relativeDescription())".dim
             ]
-            notes += dropped.map { "  no longer eligible: ".dim + Output.path($0.path) }
+            notes += run.dropped.map { "  no longer eligible: ".dim + Output.path($0.path) }
             Output.emit(notes, toStandardError: json)
-            guard !plan.isEmpty else {
-                let dismiss = "spacekit suggestions dismiss \(Output.safe(suggestion.id))"
-                Output.emit(
-                    ["Nothing in this suggestion still matches the job's conditions. Dismiss it: " + dismiss], toStandardError: json)
-                if json {
-                    try Output.json(RunJSON(plan: PlanJSON(plan: plan, executor: runner.executor, context: .manual(confirmed: false))))
-                }
+            guard let plan = run.plan else {
+                try settleNothingLeft(run, suggestion: suggestion, executor: context.executor, dismiss: dismiss)
                 return
             }
             guard
-                let report = try CleanupOutput.session(
-                    plan, executor: runner.executor, yes: yes, json: json, interactive: false, heading: "Suggested cleanup",
+                let outcome = try JobsCommand.complete(
+                    run, plan: plan, executor: context.executor, acknowledgement: acknowledgement, json: json,
+                    heading: "Suggested cleanup",
                     hint: "Preview only. Approve with: spacekit suggestions approve \(Output.safe(suggestion.id)) --yes")
             else { return }
-            let recorded = JobsCommand.record(.manual(evaluation, report: report), runner: runner)
-            if report.removedAnything && !report.hasProblems {
-                try context.suggestions.remove(suggestion.id)
-            } else {
-                Output.emit(["Kept the suggestion, so you can try again or dismiss it."], toStandardError: json)
+            Output.emit(Self.fateLines(outcome.fate), toStandardError: json)
+            try JobsCommand.finish(outcome)
+        }
+
+        /// Nothing in the suggestion still meets its job's conditions, or the guard blocks all of it. Approving it (`--yes`)
+        /// runs nothing, records the job's run and dismisses it; the plan printed is the suggestion's own, with nothing left
+        /// in it but the blocked rows, each with its verdict and reasons.
+        private func settleNothingLeft(_ run: ManualJobRun, suggestion: Suggestion, executor: CleanupExecutor, dismiss: String) throws {
+            let reason = Output.safe(run.skipReason ?? "")
+            var left = suggestion.plan
+            left.items = run.blockedRows.items
+            left.commands = run.blockedRows.commands
+            let plan = PlanJSON(CleanupReview(left, executor: executor))
+            guard acknowledgement.yes, let outcome = run.settleWithNothingLeft() else {
+                Output.emit([reason + ". Approving it with --yes dismisses it, as does: " + dismiss], toStandardError: json)
+                if json { try Output.json(RunJSON(plan: plan)) }
+                return
             }
-            try CleanupOutput.exitIfProblems(report)
-            if !recorded { throw ExitCode(1) }
+            Output.emit([reason + "."] + Self.fateLines(outcome.fate), toStandardError: json)
+            if json { try Output.json(RunJSON(plan: plan, result: ReportJSON(outcome.report))) }
+            try JobsCommand.finish(outcome)
+        }
+
+        private static func fateLines(_ fate: ManualJobRun.SuggestionFate?) -> [String] {
+            switch fate {
+            case .kept(let kept):
+                let count = kept.plan.items.count + kept.plan.commands.count
+                return ["Kept the suggestion with \(count) left to clean, so you can try again or dismiss it."]
+            case .dismissed: return ["Dismissed the suggestion: nothing in it is left to clean."]
+            case .gone: return ["The suggestion was dismissed or replaced while this ran, so it's left as it is now."]
+            case nil: return []
+            }
         }
     }
 

@@ -126,7 +126,16 @@ struct DiskMapView: View {
         let depth = model.mapDepth
         let colorer = MapColorer(mode: model.colorMode, ruleIndex: model.ruleIndex)
         let key = self.key
-        let layout = try? await model.readingTrees { () -> MapGeometry in
+        // The read begins here, on the main actor, where the workspace's changes run: none can land between this
+        // check and the layout. This view may have been built before a change took its folder out of the tree (the
+        // model has moved on to the survivor); that folder's parents may already be freed, so it isn't laid out.
+        let lease = model.workspace.beginRead()
+        guard focus === model.focus else {
+            lease.end()
+            return
+        }
+        let layout = await Task.detached(priority: .userInitiated) {
+            defer { lease.end() }
             var geometry = MapGeometry(key: key, size: size)
             switch visualization {
             case .sunburst:
@@ -138,8 +147,8 @@ struct DiskMapView: View {
                 geometry.colors = geometry.cells.map { colorer.color(item: $0.item, branch: $0.branch, depth: $0.depth) }
             }
             return geometry
-        }
-        guard let layout, !Task.isCancelled else { return }
+        }.value
+        guard !Task.isCancelled else { return }
         geometry = layout
     }
 
@@ -280,7 +289,8 @@ struct LiveScanMap: View {
                 var angle = -Double.pi / 2
                 for (index, child) in children.enumerated() where child.liveSize > 0 {
                     let sweep = Double(child.liveSize) / total * 2 * .pi
-                    let path = annularSector(center: center, inner: inner, outer: outer, start: .radians(angle), end: .radians(angle + sweep))
+                    let path = annularSector(
+                        center: center, inner: inner, outer: outer, start: .radians(angle), end: .radians(angle + sweep))
                     context.fill(path, with: .color(Theme.categorical(index).opacity(0.85)))
                     context.stroke(path, with: .color(Theme.surface), lineWidth: 1)
                     angle += sweep
@@ -308,7 +318,7 @@ struct MapItemMenu: View {
                 }
                 .disabled(model.isInCleanupList(disk.path))
                 Button("Move to Trash…") {
-                    model.review(model.manualPlan([cleanup]), title: "Remove \(disk.name)")
+                    model.review(CleanupPlan(items: [cleanup]), title: "Remove \(disk.name)")
                 }
             }
             if let path = disk.path, disk.isDirectory {

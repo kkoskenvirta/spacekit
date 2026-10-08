@@ -101,10 +101,10 @@ struct LooseFileNameTests {
             action: ActionSpec(remove: true))
         let result = try scan(tree.root)
         let findings = RuleEngine(rules: [outer, inner]).evaluate(result).filter { $0.rule.id == "cache" }
-        let plan = CleanupPlan.make(findings: findings, trashPreference: false, created: Date())
+        let plan = CleanupPlan.make(findings: findings, trashPreference: false, scanStarted: result.scanStarted)
         #expect(plan.items.first { $0.kind == .looseFiles }?.looseFileNames == ["small.tmp"])
 
-        let report = sandboxExecutor(tree, rules: [outer, inner]).execute(plan, context: .manual(confirmed: true), dryRun: false)
+        let report = manualRun(plan, with: sandboxExecutor(tree, rules: [outer, inner]))
         #expect(report.removedAnything)
         #expect(onDisk(tree.path("home/cache/big.log")))
         #expect(!onDisk(tree.path("home/cache/small.tmp")))
@@ -116,8 +116,9 @@ struct LooseFileNameTests {
         try tree.file("home/cache/a.tmp", bytes: 1_000)
         let rule = cacheRule(tree, level: .safe, paths: ["home/cache"])
         let plan = CleanupPlan(
-            items: [CleanupItem(path: tree.path("home/cache"), kind: .looseFiles, size: 1_000, ruleID: "cache")], useTrash: false)
-        let report = sandboxExecutor(tree, rules: [rule]).execute(plan, context: .manual(confirmed: true), dryRun: false)
+            items: [CleanupItem(path: tree.path("home/cache"), kind: .looseFiles, size: 1_000, ruleID: "cache", scanStarted: Date())],
+            useTrash: false)
+        let report = manualRun(plan, with: sandboxExecutor(tree, rules: [rule]))
         #expect(report.skipped.first?.reason.contains("refresh") == true)
         #expect(onDisk(tree.path("home/cache/a.tmp")))
     }
@@ -127,7 +128,7 @@ struct LooseFileNameTests {
         let tree = try TempTree()
         try tree.file("home/.Trash/a.tmp", bytes: 1_000)
         try tree.file("home/.Trash/dir/b", bytes: 1_000)
-        let plan = Trash.emptyingPlan(try scan(tree.path("home/.Trash")), rules: [], created: Date(), home: tree.path("home"))
+        let plan = Trash.emptyingPlan(try scan(tree.path("home/.Trash")), rules: [], home: tree.path("home"))
         #expect(plan.items.first { $0.kind == .looseFiles }?.looseFileNames == ["a.tmp"])
     }
 }
@@ -165,6 +166,22 @@ struct LooseFilesUpdateTests {
         let top = tree.allocated("cache/top.bin")
         after.apply([Removal(path: tree.path("cache/top.bin"), kind: .file, bytes: top)])
         #expect(looseSize(after) == looseSize(before)! - top)
+    }
+
+    @Test("A removal takes all of an item at or below the folder it removed, or the same folder's loose files")
+    func takesAll() {
+        let folder = Removal(path: "/c/a", kind: .directory, bytes: 1)
+        let loose = Removal(path: "/c", kind: .looseFiles, bytes: 1)
+        let partial = Removal(path: "/c/b", kind: .directory, bytes: 1, partial: true)
+
+        #expect(folder.takesAll(of: "/c/a", kind: .directory))
+        #expect(folder.takesAll(of: "/c/a/x", kind: .looseFiles))
+        #expect(!folder.takesAll(of: "/c", kind: .looseFiles))
+        #expect(!folder.takesAll(of: "/c/ab", kind: .directory))
+        #expect(loose.takesAll(of: "/c", kind: .looseFiles))
+        #expect(!loose.takesAll(of: "/c", kind: .directory))
+        #expect(!loose.takesAll(of: "/c/a", kind: .looseFiles))
+        #expect(!partial.takesAll(of: "/c/b", kind: .directory))
     }
 
     @Test("Removing a file deeper down doesn't touch the loose-files item")

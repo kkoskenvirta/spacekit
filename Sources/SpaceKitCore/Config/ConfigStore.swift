@@ -62,6 +62,12 @@ public struct ConfigStore: Sendable {
 
     /// Semantic checks beyond YAML syntax.
     public static func validate(_ config: SpaceKitConfig) throws {
+        // An error, not a silent skip: the whole config fails closed, so the person sees why and nothing runs.
+        if let problem = config.safety.allowedCommands.lazy.compactMap(CommandTrust.allowedCommandProblem).first {
+            let path: [CodingKey] = [SpaceKitConfig.CodingKeys.safety, SafetySettings.CodingKeys.allowedCommands]
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: path, debugDescription: problem + "; remove it, and list the cleanup tool itself by its own name"))
+        }
         var ids = Set<String>()
         for job in config.jobs {
             guard ids.insert(job.id).inserted else {
@@ -73,8 +79,8 @@ public struct ConfigStore: Sendable {
         }
     }
 
-    /// Saves the config, keeping the previous file as `config.yaml.bak`. Front ends call `update(_:)` instead,
-    /// which applies one change to the file as it is now and never overwrites a file that doesn't parse.
+    /// Saves the config, keeping the previous file as `config.yaml.bak`. Front ends call `SpaceKitContext.applying(_:)`
+    /// instead, which applies one change to the file as it is now and never overwrites a file that doesn't parse.
     func save(_ config: SpaceKitConfig) throws {
         try ConfigStore.validate(config)
         let body = try YAMLEncoder().encode(config)
@@ -124,7 +130,7 @@ public struct ConfigStore: Sendable {
           trash: always             # always = move to Trash; rules = regenerable caches may be deleted directly
           maxBytesPerRun: 100GB     # an automatic run never removes more than this
           protectedPaths: []        # your own never-touch list, e.g. [~/Work/client-archive]
-          allowedCommands: []       # tools your own rules' commands may run; built-in rules also trust brew, docker, xcrun, npm, …
+          allowedCommands: []       # tools your own rules may run, by hand only; no shells or interpreters
 
         rules:
           disabled: []              # rule ids to ignore, e.g. [node.node-modules]

@@ -5,7 +5,8 @@ import Testing
 
 @Suite("Path helpers")
 struct PathUtilTests {
-    let realHome = PathUtil.standardize(FileManager.default.homeDirectoryForCurrentUser.path)
+    /// The home the password database gives this user: no variable of the environment moves it.
+    let realHome = PathUtil.standardize(String(cString: getpwuid(getuid()).pointee.pw_dir))
 
     @Test("SPACEKIT_HOME is ignored unless the build honours it")
     func homeOverride() {

@@ -96,18 +96,33 @@ extension TUIApp {
     }
 
     /// Applies `change` to the config file as it is on disk now, not to the copy loaded at start, which would
-    /// drop jobs added elsewhere since. Refuses while the file is invalid: saving would replace it with defaults.
+    /// drop jobs added elsewhere since. A file fixed since is adopted; one that is invalid now is left as it is.
     func saveConfig(_ message: String, _ change: (inout SpaceKitConfig) throws -> Void) {
         do {
-            if let error = context.configError {
-                throw TUIError(message: "Config file is invalid: \(error). Fix it (spacekit config validate) first")
-            }
-            context.config = try context.configStore.update(change)
+            let previous = context
+            context = try context.applying(change)
+            relabel(after: previous)
             flash(message)
+        } catch let error as ConfigError {
+            flash(
+                "Config file is invalid, nothing was saved: \(TerminalText.sanitize(error.localizedDescription)). "
+                    + "Fix it (spacekit config validate) first")
         } catch {
             flash("Couldn't save config: \(TerminalText.sanitize(error.localizedDescription))")
         }
         refreshAutomation()
+    }
+
+    /// Labels folders with the rules of the context that replaced `previous`, if they differ: a change saved here
+    /// also adopts rule settings edited in the file since (the context reloads its library for those).
+    private func relabel(after previous: SpaceKitContext) {
+        let relabelling = context.relabelling(since: previous)
+        if relabelling.reindex {
+            let reindexed = workspace.reindex(rules: context.library.rules)
+            // `r` cleared the findings for a new analysis, which brings its own.
+            if state.analysisProgress == nil { state.result = reindexed.result }
+        }
+        if relabelling.rebuildIndex { state.libraryIndex = context.ruleIndex }
     }
 
     // MARK: Running a job
@@ -116,40 +131,34 @@ extension TUIApp {
         state.activity = .evaluating(TerminalText.sanitize(job.name))
         let (runner, inbox) = (JobRunner(context: context), inbox)
         Thread.detachNewThread {
-            let result = Result { () throws -> (JobEvaluation, CleanupPlan) in
-                let evaluation = try runner.evaluate(job)
-                return (evaluation, runner.plan(for: evaluation))
-            }
-            inbox.post(.evaluated(job, result))
+            inbox.post(.evaluated(job, Result { try ManualJobRun.prepare(job, runner: runner) }))
         }
     }
 
-    func jobEvaluated(_ job: Job, _ result: Result<(JobEvaluation, CleanupPlan), Error>) {
+    /// Opens the review of a job run that goes ahead. One that would skip says why, and offers to run anyway when
+    /// only the job's threshold holds it back.
+    func jobEvaluated(_ job: Job, _ result: Result<ManualJobRun, Error>) {
         state.activity = nil
         let name = TerminalText.sanitize(job.name)
+        let title = "Run “\(name)” now"
         switch result {
         case .failure(let error):
             state.modal = Modal(title: name, lines: [TerminalText.sanitize(error.localizedDescription)])
-        case .success(let (evaluation, plan)):
-            guard evaluation.isTriggered, !plan.isEmpty else {
-                var lines = [TerminalText.sanitize(evaluation.triggerSummary)]
-                if let problem = record(evaluation, report: nil) { lines.append(problem.fg(ANSI.protected)) }
-                refreshAutomation()
-                state.modal = Modal(title: name, lines: lines)
+        case .success(let run):
+            if let plan = run.plan {
+                confirmCleanup(plan, title: title, run: run)
                 return
             }
-            confirmCleanup(plan, title: "Run “\(name)” now", job: evaluation)
-        }
-    }
-
-    /// Saves the run the way `JobRunner.run` would, so the job's schedule moves on and the Automation view
-    /// shows the outcome. Returns the problem if the state couldn't be saved.
-    func record(_ evaluation: JobEvaluation, report: CleanupReport?) -> String? {
-        do {
-            try JobRunner(context: context).record(.manual(evaluation, report: report))
-            return nil
-        } catch {
-            return "Couldn't save the job's state: \(TerminalText.sanitize(error.localizedDescription))"
+            let reason = TerminalText.sanitize(run.skipReason ?? "")
+            let forced = run.forced()
+            guard run.canForce, let plan = forced.plan else {
+                state.modal = Modal(title: name, lines: [reason])
+                return
+            }
+            state.modal = Modal(
+                title: name, lines: [reason, "", "Run it anyway?"],
+                onConfirm: { [unowned self] in self.confirmCleanup(plan, title: title, run: forced) },
+                confirmLabel: "y run anyway · n cancel")
         }
     }
 

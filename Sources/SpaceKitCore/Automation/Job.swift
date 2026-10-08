@@ -2,7 +2,8 @@ import Foundation
 
 /// A scheduled cleanup ("Automation" in the app, `jobs:` in the config).
 public struct Job: Codable, Sendable, Identifiable, Hashable {
-    public enum Mode: String, Codable, Sendable, CaseIterable {
+    /// Ordered as declared, by how much a job does on its own: `observe` < `suggest` < `automatic`.
+    public enum Mode: String, Codable, Sendable, CaseIterable, Comparable {
         /// Tell me when this gets large.
         case observe
         /// Prepare a cleanup, but ask me first.
@@ -25,6 +26,8 @@ public struct Job: Codable, Sendable, Identifiable, Hashable {
             case .automatic: return "Clean on schedule. Regenerable items only, unless review items are included."
             }
         }
+
+        public static func < (lhs: Mode, rhs: Mode) -> Bool { lhs.declarationIndex < rhs.declarationIndex }
     }
 
     public enum Action: String, Codable, Sendable, CaseIterable {
@@ -142,10 +145,14 @@ public struct Job: Codable, Sendable, Identifiable, Hashable {
     /// How long a project counts as active for a rule's `active_projects` exclusion when its policy sets no `keepRecent`.
     public static let defaultActiveProjectsWindow = Age.days(14)
 
-    /// A job pre-filled from a rule's suggested policy.
+    /// A job pre-filled from a rule's suggested policy. A rule whose action runs a tool command is suggested as `suggest`
+    /// at most: an automatic run starts a tool only from folders the person can't change, which a typical install isn't
+    /// (Homebrew under a prefix they own, apps in `/Applications`, `~/.cargo/bin`), so the job would skip every time.
+    /// Suggested instead, the person approves it and it runs by hand.
     public static func suggested(for rule: Rule) -> Job {
         let policy = rule.policy
-        let mode = policy?.mode ?? (rule.safety.level == .safe ? .automatic : .suggest)
+        let runsCommand = rule.action.command != nil || rule.action.itemCommand != nil
+        let mode = runsCommand ? min(policyMode(of: rule), .suggest) : policyMode(of: rule)
         var keep = policy?.keepRecent
         if keep == nil && rule.exclusions.contains(where: RuleEngine.isActiveProjectsToken) { keep = Job.defaultActiveProjectsWindow }
         return Job(
@@ -155,17 +162,35 @@ public struct Job: Codable, Sendable, Identifiable, Hashable {
     }
 }
 
+extension Job {
+    /// The mode a rule's policy asks for: its own, or automatic for a regenerable rule and suggest otherwise.
+    static func policyMode(of rule: Rule) -> Mode {
+        rule.policy?.mode ?? (rule.safety.level == .safe ? .automatic : .suggest)
+    }
+}
+
+extension CaseIterable where Self: Equatable, AllCases == [Self] {
+    /// The case's position in `allCases`, which lists cases as they are declared. The orders above follow it, so a
+    /// new case goes where it belongs in the order.
+    var declarationIndex: Int { Self.allCases.firstIndex(of: self) ?? Self.allCases.count }
+}
+
 public enum Weekday: String, Codable, Sendable, CaseIterable {
     case sunday, monday, tuesday, wednesday, thursday, friday, saturday
 
     /// `Calendar` weekday number (Sunday = 1).
-    public var number: Int { Weekday.allCases.firstIndex(of: self)! + 1 }
+    public var number: Int { declarationIndex + 1 }
     public var title: String { rawValue.capitalized }
 }
 
 /// When a job runs. YAML accepts `weekly`, `daily at 03:00`, or an object `{every: weekly, weekday: sunday, at: "03:00"}`.
 public struct Schedule: Codable, Sendable, Hashable, CustomStringConvertible {
-    public enum Frequency: String, Codable, Sendable, CaseIterable { case hourly, daily, weekly, monthly }
+    /// Ordered as declared, by the time between runs: `hourly` < `daily` < `weekly` < `monthly`.
+    public enum Frequency: String, Codable, Sendable, CaseIterable, Comparable {
+        case hourly, daily, weekly, monthly
+
+        public static func < (lhs: Frequency, rhs: Frequency) -> Bool { lhs.declarationIndex < rhs.declarationIndex }
+    }
 
     public var every: Frequency
     /// `HH:mm`, local time.

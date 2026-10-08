@@ -27,8 +27,7 @@ struct PartialRemovalTests {
         let gone = tree.allocated("home/cache/item/a") + tree.allocated("home/cache/item/c")
         let rule = cacheRule(tree, level: .safe, paths: ["home/cache"])
 
-        let report = sandboxExecutor(tree, rules: [rule])
-            .execute(CleanupPlan(items: [item], useTrash: false), context: .manual(confirmed: true), dryRun: false)
+        let report = manualRun(CleanupPlan(items: [item], useTrash: false), with: sandboxExecutor(tree, rules: [rule]))
 
         let outcome = try #require(report.items.first?.outcome)
         guard case .failed(let reason) = outcome else {
@@ -59,10 +58,8 @@ struct PartialRemovalTests {
         let gone = first.size - tree.allocated("home/cache/first/b")
         #expect(budget - gone < second.size)
 
-        let report = sandboxExecutor(tree, rules: [rule], budget: ByteCount(budget))
-            .execute(
-                CleanupPlan(items: [first, second], useTrash: false), context: .automatic(AutomationContext(jobID: "j")),
-                dryRun: false)
+        let plan = AutomaticPlan(CleanupPlan(items: [first, second], useTrash: false), automation: AutomationContext(jobID: "j"))
+        let report = sandboxExecutor(tree, rules: [rule], budget: ByteCount(budget)).execute(plan, dryRun: false)
 
         #expect(report.items.first?.outcome.isFailed == true)
         #expect(report.skipped.first?.reason.hasPrefix("Over this run's budget") == true)
@@ -79,8 +76,7 @@ struct PartialRemovalTests {
         var analysis = Analysis(findings: RuleEngine(rules: [rule]).evaluate(scanned), tree: scanned)
         let before = try #require(analysis.finding(ruleID: "cache")?.items.first { $0.path == item.path }?.size)
 
-        let report = sandboxExecutor(tree, rules: [rule])
-            .execute(CleanupPlan(items: [item], useTrash: false), context: .manual(confirmed: true), dryRun: false)
+        let report = manualRun(CleanupPlan(items: [item], useTrash: false), with: sandboxExecutor(tree, rules: [rule]))
         let freed = try #require(report.partiallyFreed[item.path])
         let removals = Removal.from(report)
         #expect(removals == [Removal(path: item.path, kind: .directory, bytes: freed, partial: true)])

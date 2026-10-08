@@ -25,7 +25,9 @@ public struct FileLeaf: Sendable, Hashable {
 ///   `children` in place) before `Scanner.scan` returns.
 /// - After that, the tree changes only through `ScanTree.applyRemoval`, `applyMove`, `splice` and `rescan`, which
 ///   the tree's owner calls from one thread or actor at a time. Reads on other threads must be
-///   synchronized with those calls by the owner (the app keeps its trees on the main actor).
+///   synchronized with those calls by the owner. The app and the TUI leave that to `Workspace`: other threads read
+///   only inside `Workspace.read` or a read lease, and changes wait for those reads, then run on the front end's own
+///   thread.
 public final class DirNode: @unchecked Sendable, Identifiable, Hashable {
     /// Folder name; roots are named by their absolute path. Changes only when an item is moved (e.g. to the Trash).
     public internal(set) var name: String

@@ -25,31 +25,9 @@
             try? FileManager.default.removeItem(atPath: request)
             var snapshot: String?
             var sheet: String?
-            for line in text.split(separator: "\n") {
-                let parts = line.split(separator: "=", maxSplits: 1).map { String($0).trimmingCharacters(in: .whitespaces) }
-                guard parts.count == 2 else { continue }
-                let (key, value) = (parts[0], parts[1])
+            for (key, value) in settings(in: text) {
                 switch key {
-                case "section": if let section = AppSection(rawValue: value) { model.section = section }
-                case "visualization": if let v = UISettings.Visualization(rawValue: value) { model.visualization = v }
-                case "color": if let c = UISettings.ColorMode(rawValue: value) { model.colorMode = c }
-                case "depth": if let d = Int(value) { model.mapDepth = d }
-                case "scan": model.scan(value)
-                case "focus": if let node = model.tree?.node(at: PathUtil.expand(value)) { model.focus = node }
-                case "select":
-                    if let item = model.focus?.items.first(where: { $0.name == value }) { model.selection = .item(item) }
-                case "hover":
-                    if let item = model.focus?.items.first(where: { $0.name == value }) {
-                        model.hovered = .item(item)
-                    } else {
-                        model.hovered = nil
-                    }
                 case "sheet": sheet = value
-                case "close":
-                    model.pendingCleanup = nil
-                    model.jobDraft = nil
-                    model.showOnboarding = false
-                    model.showSafety = false
                 case "snapshot":
                     // A bare file name only, so the PNG lands inside the debug folder.
                     guard !value.contains("/"), value != ".", value != "..", !value.isEmpty else {
@@ -57,39 +35,87 @@
                         break
                     }
                     snapshot = value
-                case "confirm-cleanup":
-                    // Only ever inside a throwaway sandbox home, so a debug hook can't touch real data:
-                    // the home must be a temp folder, every item must live inside it, and tool commands
-                    // (which act system-wide, e.g. `brew cleanup`) are refused outright. The home is resolved
-                    // because scanned paths are: a `/tmp/…` sandbox shows up as `/private/tmp/…` in the plan.
-                    // Items are deleted, never moved to the Trash: the Trash is the real one, outside the sandbox.
-                    let home = PathUtil.realpath(PathUtil.home) ?? PathUtil.home
-                    guard home.hasPrefix("/private/tmp/") || home.hasPrefix("/private/var/folders/"),
-                        !model.config.safety.trashesEverything,
-                        let pending = model.pendingCleanup,
-                        pending.plan.commands.isEmpty,
-                        !pending.plan.items.isEmpty,
-                        pending.plan.items.allSatisfy({ PathUtil.isStrictAncestor(home, of: $0.path) })
-                    else {
-                        try? "refused: plan is not confined to the sandbox home, or the config sends everything to the Trash\n"
-                            .appendLine(to: directory + "/events.log")
-                        break
-                    }
-                    let started = Date()
-                    var deleting = pending.plan
-                    deleting.useTrash = false
-                    let plan = deleting
-                    Task {
-                        // Never confirmed: only items the guard allows outright are removed.
-                        _ = await model.execute(plan, confirmed: false, onProgress: { _, _, _ in })
-                        model.pendingCleanup = nil
-                        let elapsed = Date().timeIntervalSince(started)
-                        try? "cleanup applied in \(elapsed)s; analysing=\(model.isAnalysing)\n"
-                            .appendLine(to: directory + "/events.log")
-                    }
-                default: break
+                case "confirm-cleanup": confirmCleanup(directory: directory, model: model)
+                default: apply(key, value, to: model)
                 }
             }
+            showSheet(sheet, model: model)
+            if let snapshot {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    MainActor.assumeIsolated { save(directory + "/" + snapshot) }
+                }
+            }
+        }
+
+        /// The request's `key=value` lines, in order.
+        private static func settings(in text: String) -> [(key: String, value: String)] {
+            text.split(separator: "\n").compactMap { line in
+                let parts = line.split(separator: "=", maxSplits: 1).map { String($0).trimmingCharacters(in: .whitespaces) }
+                return parts.count == 2 ? (parts[0], parts[1]) : nil
+            }
+        }
+
+        /// One setting that changes what the window shows.
+        private static func apply(_ key: String, _ value: String, to model: AppModel) {
+            switch key {
+            case "section": if let section = AppSection(rawValue: value) { model.section = section }
+            case "visualization": if let v = UISettings.Visualization(rawValue: value) { model.visualization = v }
+            case "color": if let c = UISettings.ColorMode(rawValue: value) { model.colorMode = c }
+            case "depth": if let d = Int(value) { model.mapDepth = d }
+            case "scan": model.scan(value)
+            case "focus": if let node = model.tree?.node(at: PathUtil.expand(value)) { model.focus = node }
+            case "select":
+                if let item = model.focus?.items.first(where: { $0.name == value }) { model.selection = .item(item) }
+            case "hover":
+                if let item = model.focus?.items.first(where: { $0.name == value }) {
+                    model.hovered = .item(item)
+                } else {
+                    model.hovered = nil
+                }
+            case "close":
+                model.pendingCleanup = nil
+                model.jobDraft = nil
+                model.showOnboarding = false
+                model.showSafety = false
+            default: break
+            }
+        }
+
+        private static func confirmCleanup(directory: String, model: AppModel) {
+            // Only ever inside a throwaway sandbox home, so a debug hook can't touch real data:
+            // the home must be a temp folder, every item must live inside it, and tool commands
+            // (which act system-wide, e.g. `brew cleanup`) are refused outright. The home is resolved
+            // because scanned paths are: a `/tmp/…` sandbox shows up as `/private/tmp/…` in the plan.
+            // Items are deleted, never moved to the Trash: the Trash is the real one, outside the sandbox.
+            let home = PathUtil.realpath(PathUtil.home) ?? PathUtil.home
+            guard home.hasPrefix("/private/tmp/") || home.hasPrefix("/private/var/folders/"),
+                !model.config.safety.trashesEverything,
+                let pending = model.pendingCleanup,
+                pending.plan.commands.isEmpty,
+                !pending.plan.items.isEmpty,
+                pending.plan.items.allSatisfy({ PathUtil.isStrictAncestor(home, of: $0.path) })
+            else {
+                try? "refused: plan is not confined to the sandbox home, or the config sends everything to the Trash\n"
+                    .appendLine(to: directory + "/events.log")
+                return
+            }
+            let started = Date()
+            var deleting = pending.plan
+            deleting.useTrash = false
+            let plan = deleting
+            Task {
+                // Through the review like every manual run, accepting no warnings: nobody saw them, so only
+                // items the guard allows outright are removed.
+                let review = await model.cleanupReview(of: plan)
+                _ = await model.execute(review.acknowledge(acceptingWarnings: false), run: pending.run, onProgress: { _, _, _ in })
+                model.pendingCleanup = nil
+                let elapsed = Date().timeIntervalSince(started)
+                try? "cleanup applied in \(elapsed)s; analysing=\(model.isAnalysing)\n"
+                    .appendLine(to: directory + "/events.log")
+            }
+        }
+
+        private static func showSheet(_ sheet: String?, model: AppModel) {
             switch sheet {
             case "onboarding": model.showOnboarding = true
             case "safety": model.showSafety = true
@@ -102,11 +128,6 @@
             case "settings":
                 NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
             default: break
-            }
-            if let snapshot {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                    MainActor.assumeIsolated { save(directory + "/" + snapshot) }
-                }
             }
         }
 

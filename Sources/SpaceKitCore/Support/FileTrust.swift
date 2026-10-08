@@ -25,15 +25,6 @@ enum FileTrust {
     /// Accounts whose config and rule files `user` trusts: their own, and root's.
     static func owners(user: uid_t = geteuid()) -> Set<uid_t> { [user, 0] }
 
-    /// For SpaceKit's built-in rules, also the owner of the running program: whoever installed SpaceKit installed
-    /// those files with it (an app copied in by another admin, a shared Homebrew prefix, a run under sudo).
-    static func builtinOwners(user: uid_t = geteuid(), executable: String? = Bundle.main.executablePath) -> Set<uid_t> {
-        var trusted = owners(user: user)
-        var st = stat()
-        if let executable, stat(executable, &st) == 0 { trusted.insert(st.st_uid) }
-        return trusted
-    }
-
     /// Writable by group or others without the sticky bit, which would stop them replacing this user's files, or
     /// open to others through its access control list.
     private static func isOpenToOthers(_ folder: String) -> Bool {

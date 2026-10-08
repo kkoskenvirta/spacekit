@@ -147,26 +147,27 @@ public final class ScanTree: @unchecked Sendable {
     /// The scanned paths. One element for a normal scan, several for a multi-root scan (where `root` is virtual).
     public let roots: [String]
     public let stats: ScanStats
-    /// When the scan began. Anything that changed on disk after this may not be reflected, so cleanup plans built
-    /// from the tree are dated by it.
-    public let started: Date
     public let options: ScanOptions
     /// Capacity of the volume containing the first root.
     public let capacity: VolumeCapacity?
+    /// When the scan began. An entry changed after this may be missing from the tree or recorded as it was, so a
+    /// cleanup planned from the tree leaves such entries alone (see `CleanupItem.scanStarted`). Splicing a later
+    /// scan into the tree keeps this earlier time, which only ever leaves more alone.
+    public let scanStarted: Date
     /// Every multiply-linked file in the tree, so a mutation that takes away the link holding a file's bytes can
     /// hand them to a surviving link.
     var hardLinks: HardLinkTable
 
     init(
-        root: DirNode, roots: [String], stats: ScanStats, started: Date, options: ScanOptions, capacity: VolumeCapacity?,
+        root: DirNode, roots: [String], stats: ScanStats, options: ScanOptions, capacity: VolumeCapacity?, scanStarted: Date,
         hardLinks: [HardLinkKey: HardLinkGroup] = [:]
     ) {
         self.root = root
         self.roots = roots
         self.stats = stats
-        self.started = started
         self.options = options
         self.capacity = capacity
+        self.scanStarted = scanStarted
         self.hardLinks = HardLinkTable(hardLinks)
     }
 
@@ -196,6 +197,18 @@ public final class ScanTree: @unchecked Sendable {
             node = next
         }
         return node
+    }
+
+    /// The folder at `path`, or the nearest one above it that's in the tree (the root if none is).
+    public func nearestNode(to path: String) -> DirNode {
+        var candidate = PathUtil.standardize(path)
+        while !candidate.isEmpty {
+            if let node = node(at: candidate) { return node }
+            let parent = PathUtil.parent(candidate)
+            if parent == candidate { break }
+            candidate = parent
+        }
+        return root
     }
 }
 

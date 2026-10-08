@@ -284,7 +284,7 @@ struct CleanupListPopover: View {
                 .disabled(!model.cleanupList.contains { $0.kind == .directory })
                 Spacer()
                 Button("Review & Clean \(model.cleanupListBytes.formattedBytes)") {
-                    model.review(model.manualPlan(model.cleanupList), title: "Clean \(model.cleanupList.count) items")
+                    model.review(CleanupPlan(items: model.cleanupList), title: "Clean \(model.cleanupList.count) items")
                     dismiss()
                 }
                 .buttonStyle(.borderedProminent)

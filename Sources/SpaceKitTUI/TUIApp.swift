@@ -4,10 +4,10 @@ import Synchronization
 
 /// The full-screen terminal interface: `spacekit tui [path]`.
 ///
-/// Threading: the UI thread (the one that calls `run()`) owns `state` and `context`, and is the only thread
-/// that reads or changes a finished scan tree. Scans, analyses, job evaluations and cleanups run on
-/// background threads that work on their own copies and report back through `inbox`; the UI thread applies
-/// their results between frames.
+/// Threading: the UI thread (the one that calls `run()`) owns `state` and `context`. Scans, analyses, job
+/// evaluations and cleanups run on background threads that work on their own copies and report back through
+/// `inbox`; the UI thread applies their results between frames. The workspace changes the scan tree only in steps
+/// it hands over through `inbox` too, so the UI thread reads the tree directly.
 public final class TUIApp {
     enum Tab: Int, CaseIterable {
         case explore, dev, ai, jobs, history
@@ -113,11 +113,11 @@ public final class TUIApp {
     /// Results posted by background threads.
     enum Event: Sendable {
         case scanned(generation: Int, Result<ScanTree, Error>)
-        case analysed(generation: Int, Result<AnalysisResult, Error>)
-        case refreshed(generation: Int, ruleIDs: Set<String>, Result<AnalysisResult, Error>)
-        case evaluated(Job, Result<(JobEvaluation, CleanupPlan), Error>)
-        /// The evaluation is set when the cleanup ran a job, so the result is recorded against it.
-        case cleaned(CleanupReport, JobEvaluation?)
+        /// A step of the workspace's, run on the UI thread.
+        case workspace(Workspace.Step)
+        case evaluated(Job, Result<ManualJobRun, Error>)
+        /// The outcome is set when the cleanup completed a job run by hand, which recorded it.
+        case cleaned(CleanupReport, ManualJobRun.Outcome?)
     }
 
     struct State {
@@ -125,8 +125,6 @@ public final class TUIApp {
         var rootPath: String
         /// Bumped by every scan; results from an older scan are dropped.
         var generation = 0
-        /// When the current scan started. Plans made from it don't touch loose files changed after this.
-        var scanStarted = Date()
         var tree: ScanTree?
         var scanProgress: ScanProgress?
         var current: DirNode?
@@ -143,8 +141,6 @@ public final class TUIApp {
         var dev = ListCursor()
         var markedRules: Set<String> = []
         var ai = ListCursor()
-        /// Removals that arrived while an analysis was reading the tree; applied when it finishes.
-        var pendingRemovals: [Removal] = []
 
         var jobSelection = 0
         var automation: AutomationSnapshot?
@@ -172,7 +168,9 @@ public final class TUIApp {
     }
 
     let terminal = Terminal()
-    let inbox = Inbox()
+    let inbox: Inbox
+    /// The scan tree and its analysis, kept current after cleanups.
+    let workspace: Workspace
     var state: State
     var context: SpaceKitContext
 
@@ -180,6 +178,9 @@ public final class TUIApp {
         let root = PathUtil.expand(path ?? context.config.scan.defaultPath)
         state = State(rootPath: root, libraryIndex: context.ruleIndex)
         self.context = context
+        let inbox = Inbox()
+        self.inbox = inbox
+        workspace = Workspace { step in inbox.post(.workspace(step)) }
     }
 
     public func run() {
@@ -220,14 +221,12 @@ public final class TUIApp {
         state.analysisProgress?.cancel()
         let progress = ScanProgress()
         state.generation += 1
-        state.scanStarted = Date()
         state.scanProgress = progress
-        state.tree = nil
+        state.tree = workspace.show(nil).tree
         state.current = nil
         state.explore = ListCursor()
         state.result = nil
         state.analysisProgress = nil
-        state.pendingRemovals = []
         state.dev = ListCursor()
         state.ai = ListCursor()
         state.error = nil
@@ -239,29 +238,8 @@ public final class TUIApp {
     }
 
     func startAnalysis() {
-        guard state.analysis == nil, state.analysisProgress == nil, let tree = state.tree else { return }
-        let progress = ScanProgress()
-        state.analysisProgress = progress
-        let (context, generation, inbox) = (context, state.generation, inbox)
-        Thread.detachNewThread {
-            let result = Result { () throws -> AnalysisResult in
-                let analysis = try context.analyzer.analyzeSync(reusing: tree, progress: progress)
-                try? context.history.recordSnapshot(analysis: analysis)
-                return context.result(of: analysis)
-            }
-            inbox.post(.analysed(generation: generation, result))
-        }
-    }
-
-    /// Re-evaluates only `ruleIDs`, after their tool commands freed space their own way.
-    func refreshFindings(ruleIDs: Set<String>) {
-        let rules = ruleIDs.compactMap { self.context.library.rule(id: $0) }
-        guard !rules.isEmpty, state.analysis != nil else { return }
-        let (context, generation, inbox) = (context, state.generation, inbox)
-        Thread.detachNewThread {
-            let result = Result { context.result(of: try context.analyzer.analyzeSync(rules: rules)) }
-            inbox.post(.refreshed(generation: generation, ruleIDs: ruleIDs, result))
-        }
+        guard state.analysis == nil, state.analysisProgress == nil, state.tree != nil else { return }
+        state.analysisProgress = workspace.analyze(context)
     }
 
     func handle(_ event: Event) {
@@ -271,31 +249,36 @@ public final class TUIApp {
             state.scanProgress = nil
             switch result {
             case .success(let tree):
-                state.tree = tree
+                state.tree = workspace.show(tree).tree
                 state.current = tree.root
                 if state.tab == .dev || state.tab == .ai { startAnalysis() }
             case .failure(let error):
                 state.error = TerminalText.sanitize(error.localizedDescription)
             }
-        case .analysed(let generation, let result):
-            guard generation == state.generation else { return }
-            state.analysisProgress = nil
-            switch result {
-            case .success(let fresh):
-                state.result = fresh
-            case .failure(let error):
-                state.error = TerminalText.sanitize(error.localizedDescription)
-            }
-            let pending = state.pendingRemovals
-            state.pendingRemovals = []
-            applyRemovals(pending)
-        case .refreshed(let generation, let ruleIDs, let result):
-            guard generation == state.generation, case .success(let fresh) = result else { return }
-            state.result?.merge(fresh, for: ruleIDs)
+        case .workspace(let step):
+            for event in step() { handle(event) }
         case .evaluated(let job, let result):
             jobEvaluated(job, result)
-        case .cleaned(let report, let job):
-            cleanupFinished(report, job: job)
+        case .cleaned(let report, let outcome):
+            cleanupFinished(report, outcome: outcome)
+        }
+    }
+
+    func handle(_ event: Workspace.Event) {
+        switch event {
+        case .analysed(let shown):
+            state.analysisProgress = nil
+            state.result = shown.result
+        case .analysisFailed(let error):
+            state.analysisProgress = nil
+            state.error = TerminalText.sanitize(error.localizedDescription)
+        case .changed(let change):
+            state.result = change.state.result
+            follow(change)
+        case .refreshed(let shown):
+            // `r` cleared the findings for a new analysis, which brings its own.
+            guard state.analysisProgress == nil else { return }
+            state.result = shown.result
         }
     }
 

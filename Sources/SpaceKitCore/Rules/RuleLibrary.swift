@@ -26,136 +26,156 @@ public struct RuleIssue: Sendable, CustomStringConvertible {
 public struct RuleLibrary: Sendable {
     public private(set) var rules: [Rule]
     public private(set) var issues: [RuleIssue]
+    /// Ids of the built-in rules, including those a user rule replaced.
+    public private(set) var builtinIDs: Set<String>
 
-    public init(rules: [Rule], issues: [RuleIssue] = []) {
+    public init(rules: [Rule], issues: [RuleIssue] = [], builtinIDs: Set<String> = []) {
         self.rules = rules
         self.issues = issues
+        self.builtinIDs = builtinIDs
     }
 
-    /// Executables that built-in rule commands may run without the user explicitly allowing them in the config.
-    /// Rules from any other folder need their executable listed in `safety.allowedCommands`.
-    public static let trustedCommands: Set<String> = [
-        "brew", "docker", "xcrun", "npm", "pnpm", "yarn", "bun", "ollama", "go", "cargo", "pip", "pip3",
-        "uv", "conda", "mamba", "gem", "pod", "flutter", "dart", "gradle", "huggingface-cli", "hf", "mise", "rustup",
-        "orb", "podman", "colima", "swift", "deno",
-    ]
+    /// The source named for a rule that didn't come from a file, such as one parsed from text in a test.
+    public static let inlineSource = "<inline>"
+
+    /// User rules loaded in place of a built-in rule with the same id.
+    public var overrides: [Rule] { rules.filter { !$0.isBuiltin && builtinIDs.contains($0.id) } }
 
     /// Loads the built-in rules and every `*.yaml` / `*.yml` in `directories`.
     ///
-    /// A user rule with the id of an earlier rule replaces it, so a built-in rule can be customised by copying
-    /// it, except that a built-in `protected` rule can't be replaced and a replacement can't have a lower safety
-    /// level than the built-in rule. Rules with validation errors are reported in `issues` but not loaded, and
-    /// `disabled` never turns off a `protected` rule.
-    public static func load(
-        builtinDirectory: String? = RuleLibrary.builtinDirectory,
-        directories: [String] = [],
-        disabled: Set<String> = []
-    ) -> RuleLibrary {
+    /// A user rule with the id of an earlier rule replaces it. An override of a built-in rule may only narrow it
+    /// (`overrideProblems`), and a built-in `protected` rule can't be replaced at all. Rules with validation errors
+    /// are reported in `issues` but not loaded, and `disabled` never turns off a `protected` rule.
+    public static func load(builtin: BuiltinRules = .standard, directories: [String] = [], disabled: Set<String> = []) -> RuleLibrary {
         var byID: [String: Rule] = [:]
         var builtinByID: [String: Rule] = [:]
         var order: [String] = []
-        var issues: [RuleIssue] = []
+        let read = sources(builtin: builtin, directories: directories)
+        var issues = read.issues
 
-        let builtin = builtinDirectory.map(PathUtil.standardize)
-        var sources: [(directory: String, isBuiltin: Bool)] = builtin.map { [($0, true)] } ?? []
-        for directory in directories.map({ PathUtil.standardize(PathUtil.expand($0)) }) where directory != builtin {
-            sources.append((directory, false))
-        }
-
-        let builtinOwners = FileTrust.builtinOwners()
-        for (directory, isBuiltin) in sources {
-            for file in yamlFiles(in: directory) {
-                if let problem = FileTrust.problem(with: file, owners: isBuiltin ? builtinOwners : FileTrust.owners()) {
-                    issues.append(RuleIssue(severity: .error, source: file, message: "not loaded: it \(problem)"))
-                    continue
-                }
-                let parsed: [Rule]
-                do {
-                    parsed = try parse(yaml: try String(contentsOfFile: file, encoding: .utf8), source: file)
-                } catch {
-                    issues.append(RuleIssue(severity: .error, source: file, message: DecodingErrorText.describe(error)))
-                    continue
-                }
-                for var rule in parsed {
-                    rule.isBuiltin = isBuiltin
-                    let ruleIssues = RuleLibrary.issues(for: rule)
-                    issues += ruleIssues
-                    if ruleIssues.contains(where: { $0.severity == .error }) { continue }
-                    if let problem = builtinByID[rule.id].flatMap({ overrideProblem(builtin: $0, replacement: rule) }) {
-                        issues.append(RuleIssue(severity: .error, source: file, ruleID: rule.id, message: problem))
+        for (file, isBuiltin) in read.sources {
+            let parsed: [Rule]
+            do {
+                parsed = try parse(yaml: file.yaml, source: file.source)
+            } catch {
+                issues.append(RuleIssue(severity: .error, source: file.source, message: DecodingErrorText.describe(error)))
+                continue
+            }
+            for var rule in parsed {
+                rule.isBuiltin = isBuiltin
+                let ruleIssues = RuleLibrary.issues(for: rule)
+                issues += ruleIssues
+                if ruleIssues.contains(where: { $0.severity == .error }) { continue }
+                if let original = builtinByID[rule.id], !isBuiltin {
+                    let problems = overrideIssues(builtin: original, override: rule)
+                    if !problems.isEmpty {
+                        issues += problems
                         continue
                     }
-                    if let existing = byID[rule.id] {
-                        let origin = PathUtil.abbreviate(existing.source ?? "<inline>")
-                        issues.append(
-                            RuleIssue(severity: .warning, source: file, ruleID: rule.id, message: "replaces the rule from \(origin)"))
-                    } else {
-                        order.append(rule.id)
-                    }
-                    byID[rule.id] = rule
-                    if isBuiltin { builtinByID[rule.id] = rule }
+                    rule.narrowing = Rule.Narrowing(builtinPaths: original.paths, builtinExclusions: pathExclusions(original))
                 }
+                if let existing = byID[rule.id] {
+                    let origin = PathUtil.abbreviate(existing.source ?? inlineSource)
+                    issues.append(
+                        RuleIssue(severity: .warning, source: file.source, ruleID: rule.id, message: "replaces the rule from \(origin)"))
+                } else {
+                    order.append(rule.id)
+                }
+                byID[rule.id] = rule
+                if isBuiltin { builtinByID[rule.id] = rule }
             }
         }
 
-        var rules: [Rule] = []
-        for rule in order.compactMap({ byID[$0] }) {
+        let enabled = enabled(order.compactMap { byID[$0] }, disabled: disabled)
+        return RuleLibrary(rules: enabled.rules, issues: issues + enabled.issues, builtinIDs: Set(builtinByID.keys))
+    }
+
+    /// The built-in rule files, then the rule files in each of `directories`, with the problems reading them.
+    private static func sources(builtin: BuiltinRules, directories: [String]) -> (
+        sources: [(file: RuleFileText, isBuiltin: Bool)], issues: [RuleIssue]
+    ) {
+        var issues = builtin.issues
+        var sources = builtin.files.map { (file: $0, isBuiltin: true) }
+        for directory in directories.map({ PathUtil.standardize(PathUtil.expand($0)) }) {
+            let read = read(directory: directory)
+            issues += read.issues
+            sources += read.files.map { (file: $0, isBuiltin: false) }
+        }
+        return (sources, issues)
+    }
+
+    /// `rules` without the ones `disabled` names, except `protected` rules: those stay, with a warning.
+    private static func enabled(_ rules: [Rule], disabled: Set<String>) -> (rules: [Rule], issues: [RuleIssue]) {
+        var kept: [Rule] = []
+        var issues: [RuleIssue] = []
+        for rule in rules {
             if disabled.contains(rule.id) {
                 guard rule.safety.level == .protected else { continue }
                 issues.append(
                     RuleIssue(
-                        severity: .warning, source: rule.source ?? "<inline>", ruleID: rule.id,
+                        severity: .warning, source: rule.source ?? inlineSource, ruleID: rule.id,
                         message: "protected rules can't be disabled; it stays active (rules.disabled)"))
             }
-            rules.append(rule)
+            kept.append(rule)
         }
-        return RuleLibrary(rules: rules, issues: issues)
+        return (kept, issues)
     }
 
-    /// Why `replacement` may not take the place of the built-in rule with the same id, or `nil` if it may.
-    static func overrideProblem(builtin: Rule, replacement: Rule) -> String? {
-        if builtin.safety.level == .protected {
-            return "can't replace the built-in protected rule with the same id; protected rules keep SpaceKit from touching that data"
+    /// Checks rule files on disk the way loading them would: a file other users could change isn't loaded
+    /// (`FileTrust`), each rule on its own, and a rule with a built-in id against the built-in rule it would replace.
+    /// `asBuiltin` judges them as built-in rules instead, for contributors checking a file in the repository's `rules/`
+    /// folder before they build: built-in rules are compiled in, never read from a file, so who could change it doesn't
+    /// matter there.
+    public static func check(files: [String], asBuiltin: Bool = false, builtin: BuiltinRules = .standard) -> (
+        rules: [Rule], issues: [RuleIssue]
+    ) {
+        let library = load(builtin: builtin)
+        var rules: [Rule] = []
+        var issues: [RuleIssue] = []
+        for file in files {
+            if !asBuiltin, let problem = FileTrust.problem(with: file) {
+                issues.append(RuleIssue(severity: .error, source: file, message: RuleLibrary.notLoaded(problem)))
+                continue
+            }
+            do {
+                rules += try parse(yaml: try String(contentsOfFile: file, encoding: .utf8), source: file).map { rule in
+                    var rule = rule
+                    rule.isBuiltin = asBuiltin
+                    return rule
+                }
+            } catch {
+                issues.append(RuleIssue(severity: .error, source: file, message: DecodingErrorText.describe(error)))
+            }
         }
-        if replacement.safety.level < builtin.safety.level {
-            return "can't lower the safety level of the built-in rule from \(builtin.safety.level.rawValue) to "
-                + "\(replacement.safety.level.rawValue); add it to rules.disabled to turn it off instead"
+        issues += RuleLibrary(rules: rules).validate()
+        if !asBuiltin {
+            for rule in rules {
+                guard let original = library.rule(id: rule.id), original.isBuiltin else { continue }
+                issues += overrideIssues(builtin: original, override: rule)
+            }
         }
-        return nil
+        return (rules, issues)
     }
 
-    /// Where the built-in rule library lives, searched in this order:
-    /// `$SPACEKIT_RULES_DIR`, the app bundle's `Resources/rules`, `<prefix>/share/spacekit/rules` next to
-    /// the executable (Homebrew, `make install`), the bundle's resources when the CLI runs from
-    /// `SpaceKit.app/Contents/Helpers`, a `rules` folder beside the executable, and, in debug builds only, the
-    /// `rules/` folder of the source checkout the binary was built from.
-    public static var builtinDirectory: String? {
-        builtinCandidates().first { path in
-            var isDirectory: ObjCBool = false
-            return FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue
+    /// The issue of a rule file other users could have changed (`FileTrust.problem`), which loading skips.
+    static func notLoaded(_ problem: String) -> String { "not loaded: it \(problem)" }
+
+    /// The text of every rule file in `directory`, except files other users could have changed (`FileTrust`).
+    static func read(directory: String) -> (files: [RuleFileText], issues: [RuleIssue]) {
+        var files: [RuleFileText] = []
+        var issues: [RuleIssue] = []
+        for file in yamlFiles(in: directory) {
+            if let problem = FileTrust.problem(with: file) {
+                issues.append(RuleIssue(severity: .error, source: file, message: notLoaded(problem)))
+                continue
+            }
+            do {
+                files.append(RuleFileText(source: file, yaml: try String(contentsOfFile: file, encoding: .utf8)))
+            } catch {
+                issues.append(RuleIssue(severity: .error, source: file, message: DecodingErrorText.describe(error)))
+            }
         }
-    }
-
-    static func builtinCandidates() -> [String] {
-        var candidates: [String] = []
-        if let env = ProcessInfo.processInfo.environment["SPACEKIT_RULES_DIR"], !env.isEmpty { candidates.append(env) }
-        if let resources = Bundle.main.resourceURL?.path { candidates.append(resources + "/rules") }
-        let executable = URL(fileURLWithPath: CommandLine.arguments.first ?? "").resolvingSymlinksInPath().deletingLastPathComponent().path
-        candidates.append(executable + "/../share/spacekit/rules")
-        candidates.append(executable + "/../Resources/rules")  // SpaceKit.app/Contents/Helpers/spacekit
-        candidates.append(executable + "/rules")
-        // Rules found in the built-in directory get built-in trust (their commands may run trusted tools). A release
-        // binary must not grant that to whatever sits at the path it was compiled from on some build machine.
-        #if DEBUG
-            candidates.append(sourceCheckoutRules)
-        #endif
-        return candidates.map(PathUtil.standardize)
-    }
-
-    /// Sources/SpaceKitCore/Rules/RuleLibrary.swift → <repo>/rules
-    static var sourceCheckoutRules: String {
-        URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
-            .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("rules").path
+        return (files, issues)
     }
 
     static func yamlFiles(in directory: String) -> [String] {
@@ -169,7 +189,7 @@ public struct RuleLibrary: Sendable {
 
     /// Parses a rule file. A file is either a single rule (has `name` at the top level) or a list under `rules:`
     /// with optional file-wide `group` and `category` defaults.
-    public static func parse(yaml: String, source: String = "<inline>") throws -> [Rule] {
+    public static func parse(yaml: String, source: String = inlineSource) throws -> [Rule] {
         guard let node = try Yams.compose(yaml: yaml), let mapping = node.mapping else { return [] }
         let decoder = YAMLDecoder()
         var rules: [Rule]
@@ -219,7 +239,7 @@ public struct RuleLibrary: Sendable {
         var issues: [RuleIssue] = []
         var seen: [String: String] = [:]
         for rule in rules {
-            let source = rule.source ?? "<inline>"
+            let source = rule.source ?? Self.inlineSource
             if let other = seen[rule.id], other != source {
                 issues.append(
                     RuleIssue(
@@ -236,7 +256,7 @@ public struct RuleLibrary: Sendable {
     static func issues(for rule: Rule, home: String = PathUtil.home) -> [RuleIssue] {
         var issues: [RuleIssue] = []
         func issue(_ severity: RuleIssue.Severity, _ message: String) {
-            issues.append(RuleIssue(severity: severity, source: rule.source ?? "<inline>", ruleID: rule.id, message: message))
+            issues.append(RuleIssue(severity: severity, source: rule.source ?? inlineSource, ruleID: rule.id, message: message))
         }
         if rule.paths.isEmpty && rule.match == nil {
             issue(.error, "needs either `path` or `match`")
@@ -256,7 +276,7 @@ public struct RuleLibrary: Sendable {
             issue(.error, "protected rules identify data to keep; they can't have a cleanup action or manual steps")
         }
         for command in [rule.action.command, rule.action.itemCommand].compactMap({ $0 }) {
-            commandIssues(command, rule: rule).forEach { issue($0.severity, $0.message) }
+            CommandTrust.ruleIssues(command, isBuiltin: rule.isBuiltin).forEach { issue($0.severity, $0.message) }
         }
         if rule.granularity == .children && rule.match != nil {
             issue(.warning, "`granularity: children` is unusual for pattern rules")
@@ -266,7 +286,7 @@ public struct RuleLibrary: Sendable {
             issue(.warning, "unknown ai.layout '\(ai.layout)'; it is shown as a cache. Use one of \(layouts)")
         }
         if let command = rule.ai?.removeCommand {
-            commandIssues(command, rule: rule).forEach { issue($0.severity, $0.message) }
+            CommandTrust.ruleIssues(command, isBuiltin: rule.isBuiltin).forEach { issue($0.severity, $0.message) }
             if command.contains(where: { $0.contains("{path}") }) {
                 issue(.error, "ai.removeCommand names a model with {name}; {path} isn't available there")
             }
@@ -284,32 +304,5 @@ public struct RuleLibrary: Sendable {
         let prefix = PathUtil.comparisonKey("/" + literal.joined(separator: "/"))
         let homeKey = PathUtil.comparisonKey(home)
         return components.count < 2 || prefix == "/" || prefix == homeKey || PathUtil.comparisonKey(expanded) == homeKey
-    }
-
-    /// Why a command from a rule outside the built-in library doesn't run: the validation warning and the
-    /// executor's refusal say the same thing.
-    static func untrustedRuleCommand(_ executable: String) -> String {
-        "'\(executable)' comes from a rule outside SpaceKit's built-in library; built-in trust covers SpaceKit's own rules only. "
-            + "Add it to safety.allowedCommands to allow it"
-    }
-
-    private static func commandIssues(_ command: [String], rule: Rule) -> [(severity: RuleIssue.Severity, message: String)] {
-        guard let executable = command.first, Shell.isBareName(executable) else {
-            let got = command.first ?? ""
-            return [(.error, "command must start with a bare program name such as brew, without / or .. or {name}; got '\(got)'")]
-        }
-        var issues: [(RuleIssue.Severity, String)] = []
-        if rule.isBuiltin {
-            if !trustedCommands.contains(executable) {
-                let message = "command '\(executable)' is not in the trusted list; it only runs if listed in safety.allowedCommands"
-                issues.append((.warning, message))
-            }
-        } else {
-            issues.append((.warning, untrustedRuleCommand(executable)))
-        }
-        if command.contains(where: { $0.contains(";") || $0.contains("&&") || $0.contains("|") || $0.contains("`") || $0.contains("$(") }) {
-            issues.append((.error, "commands run without a shell; remove shell syntax (; && | ` $( )"))
-        }
-        return issues
     }
 }

@@ -163,7 +163,7 @@ extension TUIApp {
             if let path = selectedItem(items)?.path { _ = Shell.run("/usr/bin/open", ["-R", path], timeout: 5) }
         case .character("d"):
             guard !refuseWhileBusy() else { return }
-            var plan = CleanupPlan(items: Array(state.marked.values), created: state.scanStarted)
+            var plan = CleanupPlan(items: Array(state.marked.values))
             if plan.items.isEmpty {
                 guard let item = selectedItem(items).flatMap(cleanupItem(for:)) else { return }
                 plan.items = [item]
@@ -179,7 +179,7 @@ extension TUIApp {
     }
 
     func cleanupItem(for item: DiskItem) -> CleanupItem? {
-        CleanupItem(item, markers: state.tree?.markers, ruleID: item.path.flatMap { state.ruleIndex.rule(for: $0)?.id })
+        state.tree.flatMap { CleanupItem(item, in: $0, ruleID: item.path.flatMap { state.ruleIndex.rule(for: $0)?.id }) }
     }
 
     // MARK: Dev Intelligence
@@ -223,12 +223,12 @@ extension TUIApp {
         case .enter, .right:
             showFinding(finding)
         case .character("d"), .character("c"):
-            guard !refuseWhileBusy() else { return }
+            guard !refuseWhileBusy(), let analysis = state.analysis else { return }
             let marked = state.markedRules
             let findings = rows.compactMap(\.finding).filter { marked.isEmpty ? $0.id == finding.id : marked.contains($0.id) }
             let plan = CleanupPlan.make(
                 findings: findings.filter(\.isCleanable), trashPreference: context.trashPreference(for: .rule),
-                created: state.analysisScanStarted)
+                scanStarted: analysis.scanStarted)
             let name = findings.count == 1 ? TerminalText.sanitize(findings[0].rule.name) : "\(findings.count) rules"
             confirmCleanup(plan, title: "Clean \(name)")
         case .character("n"):
@@ -269,8 +269,8 @@ extension TUIApp {
         case .pageUp: select(position - 10)
         case .pageDown: select(position + 10)
         case .character("d"), .character("x"):
-            guard !refuseWhileBusy(), let model = rows[selectable[position]].model else { return }
-            guard let plan = CleanupPlan.removing(model, created: state.analysisScanStarted) else {
+            guard !refuseWhileBusy(), let model = rows[selectable[position]].model, let analysis = state.analysis else { return }
+            guard let plan = CleanupPlan.removing(model, scanStarted: analysis.scanStarted) else {
                 flash("\(TerminalText.sanitize(model.name)) can't be removed on its own; remove the models that use it")
                 return
             }
@@ -282,10 +282,6 @@ extension TUIApp {
 }
 
 extension TUIApp.State {
-    /// When the scan behind the Dev and AI findings began: the Explore scan's unless the analysis scanned the
-    /// rule locations itself.
-    var analysisScanStarted: Date { result?.scanStarted ?? scanStarted }
-
     /// Dev Intelligence rows: a heading per safety level, then its findings.
     var devRows: [(group: String, finding: Finding?)] {
         guard let analysis else { return [] }

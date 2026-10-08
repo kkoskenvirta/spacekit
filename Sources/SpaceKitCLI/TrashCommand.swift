@@ -9,7 +9,8 @@ struct TrashCommand: ParsableCommand {
         abstract: "How much the Trash holds (it still uses disk space), and empty it.",
         discussion: """
             SpaceKit moves things to the Trash by default, so they can be put back. The space is only released
-            when the Trash is emptied. `spacekit trash --empty` previews; add --yes to delete permanently.
+            when the Trash is emptied. `spacekit trash --empty` previews and asks on a terminal. Entries in the
+            Trash need review, so without a terminal pass --yes --accept-warnings to delete them permanently.
             """
     )
 
@@ -21,12 +22,10 @@ struct TrashCommand: ParsableCommand {
 
     @OptionGroup var global: GlobalOptions
     @Flag(name: .long, help: "Empty the Trash (preview unless --yes).") var empty = false
-    @Flag(name: [.short, .long], help: "Delete without asking.") var yes = false
+    @OptionGroup var acknowledgement: AcknowledgementOptions
     @Flag(name: .long, help: "Machine-readable output.") var json = false
 
     func run() throws {
-        // Entries moved to the Trash after this weren't in the preview, so the executor leaves them.
-        let started = Date()
         let context = global.loadContext()
         let path = Trash.path()
         let tree = try Scanner(options: Trash.scanOptions(context.scanOptions)).scan(path)
@@ -42,11 +41,11 @@ struct TrashCommand: ParsableCommand {
         }
         // `--empty --json` always answers in the documented `{"plan": …}` shape, even with nothing to empty.
         guard status.bytes > 0 || json else { return }
-        let plan = Trash.emptyingPlan(tree, rules: context.library.rules, created: started)
+        let plan = Trash.emptyingPlan(tree, rules: context.library.rules)
         guard
             let report = try CleanupOutput.session(
-                plan, executor: context.executor, yes: yes, json: json, interactive: true, heading: "Empty the Trash",
-                verb: "Delete", hint: "Nothing deleted. Run with --yes to empty the Trash.")
+                plan, executor: context.executor, acknowledgement: acknowledgement, json: json, interactive: true,
+                heading: "Empty the Trash", verb: "Delete", hint: "Nothing deleted. Run with --yes to empty the Trash.")
         else { return }
         if !json, let capacity = VolumeCapacity.of(path: "/"), capacity.purgeable > 1_000_000_000,
             !LocalSnapshots.list().isEmpty

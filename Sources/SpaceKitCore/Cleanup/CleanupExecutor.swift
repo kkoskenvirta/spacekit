@@ -1,11 +1,43 @@
 import Foundation
 
+/// Why a row was left alone, as a value: reports decide what counts as a problem from it, never from the wording.
+public enum SkipKind: Sendable, Equatable, CaseIterable {
+    /// The check at removal time raised a reason the review didn't show, or the row isn't where the review judged it,
+    /// or the review was made with another executor. The person never saw that, so it's a problem.
+    case changedSinceReview
+    /// The review showed warnings the person didn't accept: a selected row left undone, so it's a problem.
+    case notAccepted
+    /// Refused for a reason a preview shows too: the guard's verdict in an automatic run, which nobody acknowledges, a
+    /// Docker endpoint, a tool that isn't installed.
+    case refused
+    /// Nothing is left to remove: the item is gone, or none of the loose files the scan saw are.
+    case gone
+    /// Not covered by the scan it came from: saved without what its scan saw, or changed since that scan.
+    case notScanned
+    /// Past an automatic run's byte budget.
+    case overBudget
+
+    /// The run didn't do something the person reviewed and said go to.
+    public var isProblem: Bool { self == .changedSinceReview || self == .notAccepted }
+}
+
 public enum CleanupOutcome: Sendable, Equatable {
     case removed(bytes: UInt64, trashedTo: String?)
     /// Dry run: what would have happened.
     case wouldRemove(bytes: UInt64)
-    case skipped(reason: String)
+    /// Left alone. `reason` is what front ends show; `kind` is what they and the report decide by.
+    case skipped(reason: String, kind: SkipKind)
     case failed(reason: String)
+
+    /// A reviewed row skipped because of `detail`, which the review didn't show.
+    static func changedSinceReview(_ detail: String) -> CleanupOutcome {
+        .skipped(reason: CleanupExecutor.changedSinceReview + detail, kind: .changedSinceReview)
+    }
+
+    /// A reviewed row skipped because the person didn't accept the warnings `reasons` the review showed.
+    static func notAccepted(_ reasons: String) -> CleanupOutcome {
+        .skipped(reason: CleanupExecutor.notAccepted + reasons, kind: .notAccepted)
+    }
 
     /// Bytes taken off their original location (deleted, or moved to the Trash).
     public var freedBytes: UInt64 {
@@ -47,11 +79,21 @@ public struct CleanupReport: Sendable {
     /// Problems that didn't stop an item but must not go unnoticed: journal writes that failed, and loose
     /// files that couldn't be removed while the rest of their folder was.
     public var warnings: [String] = []
+    /// What a run left on purpose inside a loose-files item it otherwise removed: files the check at removal time
+    /// refused, and files past an automatic run's budget. Shown like a refused item, and like one not a problem: the
+    /// review judges the folder's files as a whole, so it couldn't have shown a reason that belongs to one file.
+    public var notes: [String] = []
     /// Trash destinations of loose files moved to the Trash, keyed by the folder (the loose-files item's `path`).
     public var trashedLooseFiles: [String: [String]] = [:]
     /// Bytes deleted from items that failed part way, keyed by the item's `path`. Their outcome is `.failed`; these
     /// bytes are gone all the same, so they count in `freedBytes` and were journaled and charged to the budget.
     public var partiallyFreed: [String: UInt64] = [:]
+    /// Folders left inside removed items because another volume is mounted on them, keyed by the item's `path`. The
+    /// item's outcome is `.removed` with the bytes that went; its folder stays, holding the volume.
+    public var leftOnOtherVolumes: [String: [String]] = [:]
+    /// The plan was reviewed with another executor (the settings changed since), so nothing ran: every row is skipped
+    /// with `CleanupExecutor.outdatedReview`. Review the plan again to run it.
+    public var reviewOutdated = false
 
     /// Everything taken off its original location, including what went to the Trash.
     public var freedBytes: UInt64 {
@@ -80,7 +122,7 @@ public struct CleanupReport: Sendable {
 
     public var skipped: [(item: CleanupItem, reason: String)] {
         items.compactMap { entry in
-            if case .skipped(let reason) = entry.outcome { return (entry.item, reason) }
+            if case .skipped(let reason, _) = entry.outcome { return (entry.item, reason) }
             return nil
         }
     }
@@ -95,36 +137,58 @@ public struct CleanupReport: Sendable {
 
 /// Carries out cleanup plans. Every item is re-checked by the `SafetyGuard` immediately before it is
 /// touched, every removal is journaled as it happens, and automatic runs stop at the configured byte budget.
+///
+/// The settings are fixed when the executor is built (a context builds one per reading of the config), and the
+/// executor is identified by that build: a `ReviewedPlan` runs only on the executor its review was made with.
 public struct CleanupExecutor: Sendable {
-    public var safety: SafetyGuard
-    public var journal: Journal?
-    public var rules: [String: Rule]
-    /// Executables allowed beyond `RuleLibrary.trustedCommands`. The only executables rules from outside the
-    /// built-in library may run.
-    public var extraAllowedCommands: Set<String>
+    public internal(set) var safety: SafetyGuard
+    public internal(set) var journal: Journal?
+    public internal(set) var rules: [String: Rule]
+    /// Which tool commands may run (`safety.allowedCommands` on top of the built-in trusted list).
+    public internal(set) var commandTrust: CommandTrust
     /// Upper bound for one automatic run.
-    public var maxBytesPerAutomaticRun: UInt64
+    public internal(set) var maxBytesPerAutomaticRun: UInt64
     /// Set when the config file exists but couldn't be read. Every removal and command is then refused, because
     /// the defaults in use lack the person's protected paths, allowed commands and disabled rules.
-    public var configError: String?
+    public internal(set) var configError: String?
     /// `safety.trash: always`: items are moved to the Trash even when a plan asks to delete them. Entries already in
     /// the Trash can still be deleted (that's emptying it).
-    public var alwaysTrash: Bool
+    public internal(set) var alwaysTrash: Bool
+    /// Made once per built executor; copies share it. A review records it, so a plan reviewed under other settings
+    /// (protected paths added, the Trash made mandatory, the config broken since) never runs under these.
+    let executorID = UUID()
     /// Moves a path to the Trash and returns where it went.
     var trash: @Sendable (String) throws -> String? = CleanupExecutor.moveToTrash
     /// Resolves the folder an item is removed from. Tests replace it to swap symlinks at the worst moment.
     var resolve: @Sendable (String) -> String? = PathUtil.realpath
+    /// Reads the device of a folder open while deleting. Tests can't mount a volume, so they replace it to stand one in.
+    var device: SafeRemoval.DeviceReader = SafeRemoval.device(of:)
+    /// Whether the volume of a folder open while trashing keeps a file's inode when the file moves. Tests can't make a
+    /// FAT or exFAT volume, so they replace it to stand one in.
+    var keepsInodes: @Sendable (Int32) -> Bool = SafeRemoval.keepsInodes(on:)
+    /// Finds and runs tools. Tests replace it with a recorder, so trust and budget checks run without real tools.
+    var runner: any ProcessRunner = SystemProcessRunner()
+    /// What the person could change on the way to a tool, which keeps it out of automatic runs. Tests can't make files
+    /// they don't own, so they replace it to stand in the system's folders.
+    var changeable: @Sendable (String) -> String? = CommandTrust.changeablePart(of:)
+    /// The link to the developer folder xcrun starts tools from. Tests can't choose the system's, so they stand in a link
+    /// of their own.
+    var developerFolderLink = CommandTrust.developerFolderLink
+    /// Reads the mount table at the start of each run. The guard keeps the table it was built with, and a context
+    /// (with its guard) lives as long as the app or TUI does; a run reads it again so a volume mounted since is still a
+    /// mount point the guard refuses. `nil` keeps the guard's own table: tests hand the guard theirs.
+    var readMounts: (@Sendable () -> VolumeTable)?
 
     public static let commandTimeout: TimeInterval = 600
 
     public init(
-        safety: SafetyGuard, journal: Journal?, rules: [Rule], extraAllowedCommands: Set<String> = [],
+        safety: SafetyGuard, journal: Journal?, rules: [Rule], allowedCommands: Set<String> = [],
         maxBytesPerAutomaticRun: UInt64 = ByteCount.gb(100).bytes, configError: String? = nil, alwaysTrash: Bool = false
     ) {
         self.safety = safety
         self.journal = journal
         self.rules = Dictionary(rules.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
-        self.extraAllowedCommands = extraAllowedCommands
+        self.commandTrust = CommandTrust(allowedCommands: allowedCommands)
         self.maxBytesPerAutomaticRun = maxBytesPerAutomaticRun
         self.configError = configError
         self.alwaysTrash = alwaysTrash
@@ -132,36 +196,29 @@ public struct CleanupExecutor: Sendable {
 
     /// Checks one item without touching it, using what the plan recorded about it.
     public func verdict(for item: CleanupItem, context: CleanupContext) -> SafetyVerdict {
-        verdict(
-            for: item, size: item.size, isRepository: item.isRepository, containsRepository: item.containsRepository, context: context)
+        verdict(for: remover.target(of: item, probingRepositories: false), ruleID: item.ruleID, context: context)
     }
 
-    /// `checkedDirectory`: the resolved folder the removal will act in. The item is judged there too, so the guard
-    /// has seen the exact location that changes, whatever a symlink in the item's path points at by then.
-    func verdict(
-        for item: CleanupItem, size: UInt64, isRepository: Bool, containsRepository: Bool, context: CleanupContext,
-        checkedDirectory: String? = nil
-    ) -> SafetyVerdict {
-        let rule = item.ruleID.flatMap { rules[$0] }
-        // Loose files are judged as "something inside the folder", not as the folder itself.
-        let path = item.kind == .looseFiles ? CleanupItem.looseFilesPath(in: item.path) : item.path
-        let name = item.kind == .looseFiles ? "*" : PathUtil.lastComponent(item.path)
-        var verdict = CleanupExecutor.judge(path, checked: checkedDirectory.map { PathUtil.join($0, name) }) { candidate in
-            safety.evaluate(
-                path: candidate, size: size, rule: rule, context: context, isRepository: isRepository,
-                containsRepository: containsRepository)
-        }
+    /// The guard's verdict on a removal target, refused outright while the config is invalid, and for something in the
+    /// Trash that the removal module wouldn't let this run take (`Remover.method`), so a preview's verdicts and totals
+    /// match what the run does.
+    func verdict(for target: RemovalTarget, ruleID: String?, context: CleanupContext) -> SafetyVerdict {
+        let rule = ruleID.flatMap { rules[$0] }
+        var verdict = safety.evaluate(target, rule: rule, context: context)
         refuseIfConfigInvalid(&verdict)
+        let remover = self.remover
+        if remover.method(inTrash: remover.isInsideTrash(target), useTrash: true, rule: rule, context: context) == nil {
+            verdict.raise(.block, CleanupExecutor.trashedNotRegenerable)
+        }
         return verdict
     }
 
-    /// The verdict on `path` and, if it's spelled differently, on the same entry in the folder that was resolved
-    /// and checked: the guard sees the exact location that changes, whatever a symlink in `path` points at by then.
-    static func judge(_ path: String, checked: String?, _ evaluate: (String) -> SafetyVerdict) -> SafetyVerdict {
-        let verdict = evaluate(path)
-        guard let checked, checked != path else { return verdict }
-        return verdict.merging(evaluate(checked))
-    }
+    /// Why an automatic run leaves something in the Trash (`Remover.method`).
+    static let trashedNotRegenerable = "Automatic runs delete things already in the Trash only when a regenerable (safe) rule covers them"
+
+    /// True when the run's circumstances block every row, whatever the row: an invalid config, or SpaceKit running as
+    /// root. Fixing them unblocks the rows, so rows blocked then aren't blocked for good.
+    var blocksEverything: Bool { configError != nil || safety.isRunningAsRoot }
 
     func refuseIfConfigInvalid(_ verdict: inout SafetyVerdict) {
         if let configError {
@@ -169,11 +226,53 @@ public struct CleanupExecutor: Sendable {
         }
     }
 
-    public func execute(
-        _ plan: CleanupPlan,
-        context: CleanupContext,
-        dryRun: Bool,
-        onProgress: (@Sendable (_ completed: Int, _ total: Int, _ current: String) -> Void)? = nil
+    public typealias ProgressHandler = @Sendable (_ completed: Int, _ total: Int, _ current: String) -> Void
+
+    /// Runs a plan a person reviewed and said go to. Each item and command is checked again first, and a warning
+    /// the review didn't show for that row skips it.
+    ///
+    /// A plan reviewed with another executor runs none of its rows: the person judged it under settings that are no
+    /// longer the ones in force. Every row is skipped with `outdatedReview` and the report is `reviewOutdated`, so
+    /// the front end can review the plan again with this executor.
+    public func execute(_ reviewed: ReviewedPlan, dryRun: Bool, onProgress: ProgressHandler? = nil) -> CleanupReport {
+        guard reviewed.review.executorID == executorID else { return CleanupExecutor.outdated(reviewed.plan, dryRun: dryRun) }
+        return execute(reviewed.plan, context: .manual, review: reviewed.review, dryRun: dryRun, onProgress: onProgress)
+    }
+
+    private static func outdated(_ plan: CleanupPlan, dryRun: Bool) -> CleanupReport {
+        var report = CleanupReport(dryRun: dryRun)
+        let skipped = CleanupOutcome.skipped(reason: outdatedReview, kind: .changedSinceReview)
+        report.items = plan.items.map { ($0, skipped) }
+        report.commands = plan.commands.map { ($0, skipped, "") }
+        report.reviewOutdated = true
+        return report
+    }
+
+    /// Runs an automatic job's plan under the automation limits. Nobody acknowledged anything, so whatever needs
+    /// confirmation is skipped.
+    func execute(_ automatic: AutomaticPlan, dryRun: Bool, onProgress: ProgressHandler? = nil) -> CleanupReport {
+        execute(automatic.plan, context: .automatic(automatic.automation), review: nil, dryRun: dryRun, onProgress: onProgress)
+    }
+
+    private func execute(
+        _ plan: CleanupPlan, context: CleanupContext, review: ReviewRecord?, dryRun: Bool, onProgress: ProgressHandler?
+    ) -> CleanupReport {
+        // Read once per run, so every row is judged against the same disk: mounts since the guard was built, and the
+        // capacity each item's share of the disk is taken of, before this run removes anything.
+        var current = self
+        if let readMounts { current.safety = current.safety.mounted(readMounts()) }
+        current.safety = current.safety.capacities(readNowFor: CleanupExecutor.volumePaths(of: plan))
+        return current.executeRows(of: plan, context: context, review: review, dryRun: dryRun, onProgress: onProgress)
+    }
+
+    /// Where the guard reads the capacity for the plan's rows: the folder holding each item (and the folder of loose
+    /// files), and the folder holding each item a command names.
+    private static func volumePaths(of plan: CleanupPlan) -> [String] {
+        plan.items.flatMap { [PathUtil.parent($0.path), $0.path] } + plan.commands.compactMap(\.itemPath).map(PathUtil.parent)
+    }
+
+    private func executeRows(
+        of plan: CleanupPlan, context: CleanupContext, review: ReviewRecord?, dryRun: Bool, onProgress: ProgressHandler?
     ) -> CleanupReport {
         var run = Run(report: CleanupReport(dryRun: dryRun), budget: context.isAutomatic ? maxBytesPerAutomaticRun : .max)
         let total = plan.items.count + plan.commands.count
@@ -182,13 +281,15 @@ public struct CleanupExecutor: Sendable {
         for item in plan.items {
             onProgress?(completed, total, item.path)
             completed += 1
-            let outcome = removeItem(item, plan: plan, context: context, run: &run)
+            let reviewed = review.map { $0.items[item.id] ?? .unseen }
+            let outcome = removeItem(item, plan: plan, context: context, reviewed: reviewed, run: &run)
             run.report.items.append((item, outcome))
         }
         for command in plan.commands {
             onProgress?(completed, total, command.displayString)
             completed += 1
-            let (outcome, output) = runCommand(command, context: context, run: &run)
+            let reviewed = review.map { $0.commands[command.id] ?? .unseen }
+            let (outcome, output) = runCommand(command, context: context, reviewed: reviewed, run: &run)
             run.report.commands.append((command, outcome, output))
         }
         onProgress?(total, total, "")
@@ -224,23 +325,54 @@ public struct CleanupExecutor: Sendable {
             automatic: context.isAutomatic, trashedTo: trashedTo)
     }
 
-    static func isConfirmed(_ context: CleanupContext) -> Bool {
-        if case .manual(let confirmed) = context { return confirmed }
-        return false
-    }
-
     static func jobID(_ context: CleanupContext) -> String? {
         if case .automatic(let automation) = context { return automation.jobID }
         return nil
     }
 
-    static func refusal(_ verdict: SafetyVerdict) -> CleanupOutcome {
-        let prefix = verdict.decision == .confirm ? "Needs confirmation: " : "Blocked: "
-        return .skipped(reason: prefix + verdict.reasons.joined(separator: "; "))
+    /// Why the run may not act on `verdict`, or `nil` when it may. `reviewed`: what the person's review showed for
+    /// this row; `nil` in an automatic run, which acknowledges nothing.
+    ///
+    /// A reviewed row may need confirmation only for reasons the review showed and the person accepted. A reason it
+    /// didn't show (a repository that appeared, a folder that grew past the share of the disk it was shown with, a
+    /// block such as a volume mounted since) skips the row as changed since the review, which counts as a problem. So
+    /// does a row whose shown warnings the person didn't accept (`--yes` without `--accept-warnings`): it was selected
+    /// and left undone.
+    ///
+    /// `unseen` makes the outcome of a reason the review couldn't show; by default the row changed since the review.
+    static func refusal(
+        _ verdict: SafetyVerdict, reviewed: ReviewRecord.Row?, unseen: (String) -> CleanupOutcome = CleanupOutcome.changedSinceReview
+    ) -> CleanupOutcome? {
+        let reasons = verdict.reasons.joined(separator: "; ")
+        switch verdict.decision {
+        case .allow:
+            return nil
+        case .block:
+            // A review never passes a blocked row on, so a block in a reviewed run is new.
+            guard reviewed != nil else { return .skipped(reason: "Blocked: " + reasons, kind: .refused) }
+            return unseen("Blocked: " + reasons)
+        case .confirm:
+            guard let reviewed else { return .skipped(reason: "Needs confirmation: " + reasons, kind: .refused) }
+            let notShown = verdict.reasons.filter { !reviewed.showed($0) }
+            if !notShown.isEmpty { return unseen(notShown.joined(separator: "; ")) }
+            return reviewed.accepted ? nil : .notAccepted(reasons)
+        }
     }
 
+    /// Starts the skip reason of a row that changed after the review: it gained a reason the review didn't show, or
+    /// isn't at the location the review judged. Reports treat it as a problem, because the person never saw that.
+    public static let changedSinceReview = "Changed since you reviewed it: "
+
+    /// Starts the skip reason of a reviewed row whose warnings the person saw and didn't accept. Reports treat it as a
+    /// problem: the row was selected and didn't run.
+    public static let notAccepted = "Warnings not accepted: "
+
+    /// Why every row of a plan reviewed with another executor is skipped.
+    public static let outdatedReview = changedSinceReview + "SpaceKit's settings changed after the review. Review it again."
+
     func overBudget() -> CleanupOutcome {
-        .skipped(reason: "Over this run's budget of \(ByteCount.format(maxBytesPerAutomaticRun)) (safety.maxBytesPerRun)")
+        let budget = ByteCount.format(maxBytesPerAutomaticRun)
+        return .skipped(reason: "Over this run's budget of \(budget) (safety.maxBytesPerRun)", kind: .overBudget)
     }
 
     static func moveToTrash(_ path: String) throws -> String? {

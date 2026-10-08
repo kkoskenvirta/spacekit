@@ -10,13 +10,14 @@ extension DirNode {
 }
 
 extension CleanupItem {
-    /// An entry picked in a scan tree (Explore), with the git facts the guard asks about. `nil` for the block of
-    /// smaller files, which has no path of its own.
-    public init?(_ item: DiskItem, markers: MarkerRegistry?, ruleID: String?) {
+    /// An entry picked in `tree` (Explore), with the git facts the guard asks about and the tree's scan start time.
+    /// `nil` for the block of smaller files, which has no path of its own.
+    public init?(_ item: DiskItem, in tree: ScanTree, ruleID: String?) {
         guard let path = item.path else { return nil }
-        let repository = item.directory?.repositoryFlags(markers) ?? (isRepository: false, containsRepository: false)
+        let repository = item.directory?.repositoryFlags(tree.markers) ?? (isRepository: false, containsRepository: false)
         self.init(
             path: path, kind: item.isDirectory ? .directory : .file, name: item.name, size: item.size, ruleID: ruleID,
-            isRepository: repository.isRepository, containsRepository: repository.containsRepository, lastUsed: item.modified)
+            isRepository: repository.isRepository, containsRepository: repository.containsRepository, lastUsed: item.modified,
+            scanStarted: tree.scanStarted)
     }
 }

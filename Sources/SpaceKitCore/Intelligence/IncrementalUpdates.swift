@@ -25,13 +25,17 @@ public struct Removal: Sendable, Hashable {
     }
 
     /// Removals in a report: successful ones (including zero-byte ones, so the tree still drops them) and
-    /// items that were deleted only in part (see `CleanupReport.partiallyFreed`).
+    /// items that were deleted only in part (see `CleanupReport.partiallyFreed`), or removed around a volume mounted
+    /// inside them (see `CleanupReport.leftOnOtherVolumes`).
     public static func from(_ report: CleanupReport) -> [Removal] {
         report.items.compactMap { entry -> Removal? in
             if let freed = report.partiallyFreed[entry.item.path], entry.outcome.isFailed {
                 return Removal(path: entry.item.path, kind: entry.item.kind, bytes: freed, partial: true)
             }
             guard entry.outcome.isRemoved else { return nil }
+            if report.leftOnOtherVolumes[entry.item.path] != nil {
+                return Removal(path: entry.item.path, kind: entry.item.kind, bytes: entry.outcome.freedBytes, partial: true)
+            }
             let trashedFiles: [String] = entry.item.kind == .looseFiles ? (report.trashedLooseFiles[entry.item.path] ?? []) : []
             return Removal(
                 path: entry.item.path, kind: entry.item.kind, bytes: entry.outcome.freedBytes, trashedTo: entry.outcome.trashedTo,
@@ -60,9 +64,37 @@ public struct Removal: Sendable, Hashable {
         return existed && (tree.root.size != before || tree.node(at: path) == nil)
     }
 
+    /// This removal for `tree`, a scan that started before the cleanup finished: the scan may have reached the item
+    /// before it went, or after. `nil` when the tree doesn't show the item where it was (a file the tree counts only in
+    /// its folder's small files can't be told apart, so it is left too). Only the removal from where it was is carried:
+    /// whether the scan saw a moved item or loose file in the Trash can't be told (it may have walked the Trash before
+    /// the move, or counted a small file only in the Trash's total), so the workspace scans the Trash again instead
+    /// (`trashFolders`). A partly deleted folder is rescanned anyway.
+    func carried(over tree: ScanTree) -> Removal? {
+        if partial { return self }
+        if kind == .looseFiles {
+            guard tree.node(at: path) != nil else { return nil }
+            return Removal(path: path, kind: kind, bytes: bytes)
+        }
+        guard tree.shows(path) else { return nil }
+        return Removal(path: path, kind: kind, bytes: bytes)
+    }
+
+    /// The Trash folders this removal moved something into. Loose files name each file they moved (`trashedTo` is the
+    /// Trash folder itself for them); an item names where it went.
+    var trashFolders: Set<String> {
+        Set((kind == .looseFiles ? trashedFiles : [trashedTo].compactMap { $0 }).map(PathUtil.parent))
+    }
+
     /// True if this removal took away everything at `path` (the item itself or a folder containing it).
     func covers(_ path: String) -> Bool {
         !partial && kind != .looseFiles && PathUtil.isAncestorOrEqual(self.path, of: path)
+    }
+
+    /// True if this removal took all of an item of `kind` at `path`: the item or a folder around it went, or, for
+    /// loose files, those of the same folder went.
+    public func takesAll(of path: String, kind: FindingItem.Kind) -> Bool {
+        covers(path) || (self.kind == .looseFiles && kind == .looseFiles && self.path == path)
     }
 
     /// True if this removal took part of `item` (but not all of it). A loose-files item only holds the plain
@@ -79,6 +111,15 @@ public struct Removal: Sendable, Hashable {
     }
 }
 
+extension ScanTree {
+    /// True if the tree has a folder at `path`, or a file there it lists by name (not only in its folder's small files).
+    fileprivate func shows(_ path: String) -> Bool {
+        if node(at: path) != nil { return true }
+        let name = PathUtil.lastComponent(path)
+        return node(at: PathUtil.parent(path))?.files.contains { $0.name == name } ?? false
+    }
+}
+
 extension Analysis {
     /// Updates findings after a cleanup without re-scanning: removed items disappear, items that lost
     /// something inside them shrink, and findings left empty are dropped.
@@ -92,9 +133,7 @@ extension Analysis {
             var changed = false
             var items: [FindingItem] = []
             for var item in finding.items {
-                if removals.contains(where: { removal in
-                    removal.covers(item.path) || (removal.kind == .looseFiles && item.kind == .looseFiles && removal.path == item.path)
-                }) {
+                if removals.contains(where: { $0.takesAll(of: item.path, kind: item.kind) }) {
                     changed = true
                     continue
                 }

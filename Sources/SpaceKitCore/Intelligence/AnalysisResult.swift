@@ -23,12 +23,8 @@ public struct AnalysisResult: Sendable {
         RuleIndex(rules: rules, findings: analysis.findings, patternRoots: patternRoots)
     }
 
-    /// When the scan behind the findings began: the Explore scan's if the analysis reused it, its own otherwise.
-    /// Plans built from the findings are dated by it.
-    public var scanStarted: Date { analysis.tree.started }
-
     /// Drops what a cleanup removed from the findings, shrinking the analysis tree too when it's a separate scan
-    /// from `exploreTree` (which the front end updates itself, see `Removal.apply(_:to:)`). Only call it while
+    /// from `exploreTree` (which the caller updates itself, see `Removal.apply(_:to:)`). Only call it while
     /// nothing else reads the trees. Returns the rules whose findings changed.
     @discardableResult
     public mutating func apply(_ removals: [Removal], exploreTree: ScanTree?) -> Set<String> {

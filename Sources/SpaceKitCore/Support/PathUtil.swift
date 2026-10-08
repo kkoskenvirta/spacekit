@@ -2,7 +2,7 @@ import Foundation
 
 /// Path helpers. All SpaceKit paths are plain absolute POSIX strings; `~` is expanded at the edges.
 public enum PathUtil {
-    /// The real user's home directory, even when `HOME` points elsewhere.
+    /// The real user's home directory, even when `HOME` or `CFFIXED_USER_HOME` points elsewhere.
     public static var home: String {
         resolveHome(environment: ProcessInfo.processInfo.environment, honorsOverride: honorsHomeOverride)
     }
@@ -19,7 +19,20 @@ public enum PathUtil {
         if honorsOverride, let override = environment["SPACEKIT_HOME"], !override.isEmpty {
             return standardize(override)
         }
-        return standardize(FileManager.default.homeDirectoryForCurrentUser.path)
+        return standardize(accountHome ?? FileManager.default.homeDirectoryForCurrentUser.path)
+    }
+
+    /// The home folder the password database gives the user SpaceKit runs as. Foundation's own answer follows
+    /// `CFFIXED_USER_HOME`, which any process of the person's can set for the background agent (`launchctl setenv`).
+    /// `nil` only when the database has no entry for the user.
+    static var accountHome: String? {
+        var entry = passwd()
+        var found: UnsafeMutablePointer<passwd>?
+        var buffer = [CChar](repeating: 0, count: 16_384)
+        guard getpwuid_r(getuid(), &entry, &buffer, buffer.count, &found) == 0, found != nil, let folder = entry.pw_dir else {
+            return nil
+        }
+        return String(cString: folder)
     }
 
     /// Expands a leading `~` and `$HOME`, then standardizes.
@@ -154,6 +167,13 @@ public enum PathUtil {
 
     public static func parent(_ path: String) -> String {
         (path as NSString).deletingLastPathComponent
+    }
+
+    /// `paths` in order, each once.
+    static func unique(_ paths: [String]) -> [String] {
+        paths.reduce(into: []) { result, path in
+            if !result.contains(path) { result.append(path) }
+        }
     }
 
     /// Expands shell-style globs (`*`, `?`, `[...]`) after `~` expansion. Non-glob paths are returned as-is if they exist.

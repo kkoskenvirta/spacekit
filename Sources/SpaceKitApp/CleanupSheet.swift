@@ -1,21 +1,20 @@
 import SpaceKitCore
 import SwiftUI
 
-/// Review-before-remove. Every item and tool command shows the safety guard's verdict; blocked ones can't be
-/// selected, and ones with warnings need an explicit acknowledgement.
+/// Review-before-remove. Renders a `CleanupReview`: every item and tool command shows the safety guard's verdict;
+/// blocked ones can't be selected, and ones with warnings need an explicit acknowledgement.
 struct CleanupSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     let pending: AppModel.PendingCleanup
 
-    /// Computed once when the sheet opens; the executor checks everything again right before removal.
-    @State private var verdicts: AppModel.PlanVerdicts?
-    @State private var excluded: Set<String> = []
-    @State private var excludedCommands: Set<String> = []
+    /// Built once when the sheet opens; the executor checks everything again right before removal.
+    @State private var review: CleanupReview?
     @State private var acknowledged = false
-    @State private var useTrash = true
     @State private var phase: Phase = .review
     @State private var progress: (done: Int, total: Int, current: String) = (0, 0, "")
+    /// Set when a run was refused because the settings changed after the review, and the review was made again.
+    @State private var reviewedAgain = false
 
     enum Phase {
         case review
@@ -23,129 +22,118 @@ struct CleanupSheet: View {
         case done(CleanupReport)
     }
 
-    private var rows: [(item: CleanupItem, verdict: SafetyVerdict)] {
-        verdicts?.items ?? []
+    private var selectedItems: [CleanupItem] { review?.selectedItems ?? [] }
+    private var selectedCommands: [PlannedCommand] { review?.selectedCommands ?? [] }
+    private var needsAcknowledgement: Bool { review?.needsAcknowledgement ?? false }
+
+    private func inclusion<Subject>(_ row: CleanupReview.Row<Subject>) -> Binding<Bool> {
+        Binding(get: { review?.isIncluded(row) ?? false }, set: { review = review?.setting(row, included: $0) })
     }
 
-    private var commandRows: [(command: PlannedCommand, verdict: SafetyVerdict)] { verdicts?.commands ?? [] }
-
-    private var selectedCommandRows: [(command: PlannedCommand, verdict: SafetyVerdict)] {
-        commandRows.filter { !$0.verdict.isBlocked && !excludedCommands.contains($0.command.id) }
-    }
-
-    private var selectedPlan: CleanupPlan {
-        var plan = pending.plan
-        plan.items = rows.filter { !$0.verdict.isBlocked && !excluded.contains($0.item.id) }.map(\.item)
-        plan.commands = selectedCommandRows.map(\.command)
-        // With `safety.trash: always` the executor moves everything to the Trash whatever the plan says.
-        plan.useTrash = useTrash || model.config.safety.trashesEverything
-        return plan
-    }
-
-    /// Everything selected is already in the Trash (emptying it): removal means deleting for good.
-    private var isEmptyingTrash: Bool {
-        let trash = model.trashPath
-        return !pending.plan.items.isEmpty && pending.plan.items.allSatisfy { PathUtil.isAncestorOrEqual(trash, of: $0.path) }
-    }
-
-    private var needsAcknowledgement: Bool {
-        rows.contains { $0.verdict.decision == .confirm && !excluded.contains($0.item.id) }
-            || selectedCommandRows.contains { $0.verdict.decision == .confirm }
+    private var useTrash: Binding<Bool> {
+        Binding(get: { review?.useTrash ?? true }, set: { review = review?.usingTrash($0) })
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             switch phase {
-            case .review: review
+            case .review: reviewPhase
             case .running: running
             case .done(let report): done(report)
             }
         }
         .padding(24)
         .frame(width: 640, height: 560)
-        .onAppear { useTrash = pending.plan.useTrash }
-        .task { verdicts = await model.verdicts(for: pending.plan) }
+        .task { review = await model.cleanupReview(of: pending.plan) }
     }
 
     // MARK: Review
 
-    private var review: some View {
+    private var reviewPhase: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(pending.title).font(.title2.weight(.semibold))
-                Spacer()
-                VStack(alignment: .trailing, spacing: 2) {
-                    let fileBytes = selectedPlan.items.reduce(0) { $0 + $1.size }
-                    let commandBytes = selectedPlan.commands.reduce(0) { $0 + $1.estimatedBytes }
-                    if !selectedPlan.items.isEmpty {
-                        Text(fileBytes.formattedBytes).font(.title2.weight(.semibold)).monospacedDigit()
-                    }
-                    if !selectedPlan.commands.isEmpty {
-                        Text("up to \(commandBytes.formattedBytes) via tools")
-                            .font(selectedPlan.items.isEmpty ? .title3.weight(.semibold) : .callout)
-                            .foregroundStyle(selectedPlan.items.isEmpty ? .primary : .secondary)
-                    }
-                }
-            }
-            List {
-                ForEach(rows, id: \.item.id) { row in
-                    CleanupRow(
-                        item: row.item, verdict: row.verdict, rule: row.item.ruleID.flatMap { model.library.rule(id: $0) },
-                        isIncluded: Binding(
-                            get: { !row.verdict.isBlocked && !excluded.contains(row.item.id) },
-                            set: { included in
-                                if included { excluded.remove(row.item.id) } else { excluded.insert(row.item.id) }
-                            }))
-                }
-                ForEach(commandRows, id: \.command.id) { row in
-                    CommandRow(
-                        command: row.command, verdict: row.verdict,
-                        isIncluded: Binding(
-                            get: { !row.verdict.isBlocked && !excludedCommands.contains(row.command.id) },
-                            set: { included in
-                                if included { excludedCommands.remove(row.command.id) } else { excludedCommands.insert(row.command.id) }
-                            }))
-                }
-                ForEach(pending.plan.manualSteps, id: \.self) { step in
-                    Label(step, systemImage: "hand.point.right").font(.callout).foregroundStyle(.secondary)
-                }
-            }
-            .listStyle(.bordered(alternatesRowBackgrounds: true))
-            .overlay {
-                if verdicts == nil { ProgressView().controlSize(.small) }
-            }
-
+            reviewHeader
+            reviewList
             if pending.plan.items.isEmpty {
                 Label("The tool decides what to remove; SpaceKit measures what was freed afterwards.", systemImage: "terminal")
                     .font(.callout).foregroundStyle(.secondary)
-            } else if isEmptyingTrash {
+            } else if let review {
+                disposal(review)
+            }
+            if reviewedAgain {
                 Label(
-                    "These items are already in the Trash. Removing them deletes them permanently.",
-                    systemImage: "exclamationmark.triangle.fill"
+                    "SpaceKit's settings changed after you reviewed this, so nothing was removed. Check the list again.",
+                    systemImage: "arrow.clockwise.circle.fill"
                 )
-                .font(.callout).foregroundStyle(Theme.critical)
-            } else if model.config.safety.trashesEverything {
-                Label("Items go to the Trash, so you can put them back. Empty the Trash to free the space.", systemImage: "trash")
-                    .font(.callout).foregroundStyle(.secondary)
-            } else {
-                Toggle("Move to Trash instead of deleting", isOn: $useTrash)
-                if !useTrash {
-                    Label("Deleted items can't be recovered.", systemImage: "exclamationmark.triangle.fill").foregroundStyle(Theme.critical)
-                        .font(.callout)
-                }
+                .font(.callout).foregroundStyle(Theme.warning).fixedSize(horizontal: false, vertical: true)
             }
             if needsAcknowledgement {
                 Toggle("I've read the warnings above and want to remove these items", isOn: $acknowledged)
                     .toggleStyle(.checkbox)
             }
-            HStack {
-                Text("Every item is checked again right before it's removed.").font(.caption).foregroundStyle(.secondary)
-                Spacer()
-                Button("Cancel", role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction)
-                Button(buttonTitle, role: .destructive) { run() }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(selectedPlan.isEmpty || (needsAcknowledgement && !acknowledged))
+            reviewButtons
+        }
+    }
+
+    /// The title, with what the selection frees.
+    private var reviewHeader: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(pending.title).font(.title2.weight(.semibold))
+            Spacer()
+            VStack(alignment: .trailing, spacing: 2) {
+                if !selectedItems.isEmpty {
+                    Text((review?.itemBytes ?? 0).formattedBytes).font(.title2.weight(.semibold)).monospacedDigit()
+                }
+                if !selectedCommands.isEmpty {
+                    Text("up to \((review?.commandBytes ?? 0).formattedBytes) via tools")
+                        .font(selectedItems.isEmpty ? .title3.weight(.semibold) : .callout)
+                        .foregroundStyle(selectedItems.isEmpty ? .primary : .secondary)
+                }
             }
+        }
+    }
+
+    /// Every item and command with its verdict and tick box, then the manual steps.
+    private var reviewList: some View {
+        List {
+            ForEach(review?.items ?? []) { row in
+                CleanupRow(
+                    item: row.subject, verdict: row.verdict, rule: row.subject.ruleID.flatMap { model.library.rule(id: $0) },
+                    isIncluded: inclusion(row))
+            }
+            ForEach(review?.commands ?? []) { row in
+                CommandRow(command: row.subject, verdict: row.verdict, isIncluded: inclusion(row))
+            }
+            ForEach(pending.plan.manualSteps, id: \.self) { step in
+                Label(step, systemImage: "hand.point.right").font(.callout).foregroundStyle(.secondary)
+            }
+        }
+        .listStyle(.bordered(alternatesRowBackgrounds: true))
+        .overlay {
+            if review == nil { ProgressView().controlSize(.small) }
+        }
+    }
+
+    private var reviewButtons: some View {
+        HStack {
+            Text("Every item is checked again right before it's removed.").font(.caption).foregroundStyle(.secondary)
+            Spacer()
+            Button("Cancel", role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction)
+            Button(buttonTitle, role: .destructive) { run() }
+                .keyboardShortcut(.defaultAction)
+                .disabled((review?.isEmpty ?? true) || (needsAcknowledgement && !acknowledged))
+        }
+    }
+
+    /// The Trash choice where the person has one, and where the items go in the review's own words.
+    @ViewBuilder
+    private func disposal(_ review: CleanupReview) -> some View {
+        if review.canChooseTrash && review.disposal != .deleteFromTrash {
+            Toggle("Move to Trash instead of deleting", isOn: useTrash)
+        }
+        if let summary = review.disposalSummary {
+            let permanent = review.disposal.isPermanent
+            Label(summary, systemImage: permanent ? "exclamationmark.triangle.fill" : "trash")
+                .font(.callout).foregroundStyle(permanent ? Theme.critical : Color.secondary)
         }
     }
 
@@ -162,9 +150,13 @@ struct CleanupSheet: View {
     }
 
     private var buttonTitle: String {
-        if selectedPlan.items.isEmpty { return "Run Cleanup" }
-        if isEmptyingTrash { return "Delete Permanently" }
-        return selectedPlan.useTrash ? "Move to Trash" : "Delete"
+        guard let review, !review.selectedItems.isEmpty else { return "Run Cleanup" }
+        switch review.disposal {
+        case .moveToTrash: return "Move to Trash"
+        case .delete: return "Delete"
+        case .deleteFromTrash: return "Delete Permanently"
+        case .moveToTrashAndDeleteFromTrash: return "Move to Trash and Delete"
+        }
     }
 
     @ViewBuilder
@@ -217,6 +209,10 @@ struct CleanupSheet: View {
                 Label(warning, systemImage: "exclamationmark.triangle.fill").foregroundStyle(Theme.warning)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            ForEach(report.notes, id: \.self) { note in
+                Label(note, systemImage: "minus.circle").foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             Spacer()
             HStack {
                 Spacer()
@@ -226,17 +222,28 @@ struct CleanupSheet: View {
     }
 
     private func run() {
-        let plan = selectedPlan
-        let confirmed = needsAcknowledgement && acknowledged
+        guard let review else { return }
+        // The checkbox is the person's one acknowledgement for the whole plan, of every warning listed above.
+        let reviewed = review.acknowledge(acceptingWarnings: acknowledged)
         phase = .running
-        progress = (0, plan.items.count + plan.commands.count, "")
+        progress = (0, reviewed.plan.items.count + reviewed.plan.commands.count, "")
         Task {
             let report = await model.execute(
-                plan, confirmed: confirmed, completion: pending.completion,
+                reviewed, run: pending.run,
                 onProgress: { done, total, current in
                     Task { @MainActor in progress = (done, total, current) }
                 })
-            phase = .done(report)
+            guard report.reviewOutdated else {
+                phase = .done(report)
+                return
+            }
+            // Reviewed under settings that are no longer in force: review it again under the current ones. The verdicts
+            // and the acknowledgement start over; the rows the person unticked stay unticked.
+            self.review = nil
+            acknowledged = false
+            reviewedAgain = true
+            phase = .review
+            self.review = await model.cleanupReview(of: pending.plan).keepingChoices(of: review)
         }
     }
 }

@@ -8,7 +8,9 @@ public struct JobEvaluation: Sendable {
     /// Findings narrowed to items that pass the job's age conditions.
     public var eligible: [Finding]
     /// When the scan behind these findings started. Files changed after it weren't part of what was evaluated.
-    public var scanned: Date = Date()
+    public var scanStarted: Date
+    /// Problems with the job's rules as the analysis resolved them (`Analysis.ruleIssues`).
+    public var ruleIssues: [RuleIssue] = []
 
     public var matchedBytes: UInt64 { findings.reduce(0) { $0 &+ $1.size } }
     public var eligibleBytes: UInt64 { eligible.reduce(0) { $0 &+ $1.size } }
@@ -70,6 +72,18 @@ extension CleanupReport {
     }
 }
 
+/// A plan an automatic job runs on its own, under its automation context. Only `JobRunner` makes one: it is the
+/// executor's only input besides a `ReviewedPlan`.
+struct AutomaticPlan: Sendable {
+    let plan: CleanupPlan
+    let automation: AutomationContext
+
+    init(_ plan: CleanupPlan, automation: AutomationContext) {
+        self.plan = plan
+        self.automation = automation
+    }
+}
+
 /// Evaluates and runs jobs. Used by the background agent (`spacekit agent run`), the CLI and the app.
 public struct JobRunner: Sendable {
     public var context: SpaceKitContext
@@ -99,7 +113,6 @@ public struct JobRunner: Sendable {
     static func customRuleID(_ job: Job) -> String { "job:\(job.id)" }
 
     public func evaluate(_ job: Job, progress: ScanProgress = ScanProgress(), now: Date = Date()) throws -> JobEvaluation {
-        let scanned = Date()
         var (rules, _) = rules(for: job)
         if !job.paths.isEmpty {
             rules.append(
@@ -108,19 +121,20 @@ public struct JobRunner: Sendable {
                     paths: job.paths, granularity: job.granularity, safety: SafetySpec(level: .review),
                     action: ActionSpec(remove: true)))
         }
-        guard !rules.isEmpty else { return JobEvaluation(job: job, findings: [], eligible: []) }
+        guard !rules.isEmpty else { return JobEvaluation(job: job, findings: [], eligible: [], scanStarted: now) }
         let analysis = try context.analyzer.analyzeSync(rules: rules, progress: progress)
         let eligible = analysis.findings.compactMap { finding -> Finding? in
             let items = finding.eligibleItems(olderThan: job.when.olderThan, keepRecent: job.when.keepRecent, now: now)
             return items.isEmpty ? nil : Finding(rule: finding.rule, items: items)
         }
-        return JobEvaluation(job: job, findings: analysis.findings, eligible: eligible, scanned: scanned)
+        return JobEvaluation(
+            job: job, findings: analysis.findings, eligible: eligible, scanStarted: analysis.scanStarted, ruleIssues: analysis.ruleIssues)
     }
 
     public func plan(for evaluation: JobEvaluation) -> CleanupPlan {
         var plan = CleanupPlan.make(
             findings: evaluation.eligible, trashPreference: context.trashPreference(for: evaluation.job.action),
-            created: evaluation.scanned)
+            scanStarted: evaluation.scanStarted)
         let customID = JobRunner.customRuleID(evaluation.job)
         for index in plan.items.indices where plan.items[index].ruleID == customID {
             plan.items[index].ruleID = nil
@@ -136,21 +150,15 @@ public struct JobRunner: Sendable {
             olderThan: job.when.olderThan, usesTrash: context.trashPreference(for: job.action) ?? true)
     }
 
-    /// Runs one job according to its mode. `manual` runs (from the app or `spacekit jobs run --yes`) clean
-    /// immediately regardless of mode, because a person asked for it. Pass `confirmed: true` only after that
-    /// person has seen and accepted the guard's warnings; otherwise items that need confirmation are skipped.
-    public func run(_ job: Job, manual: Bool = false, confirmed: Bool = false, dryRun: Bool = false, now: Date = Date()) -> JobRunResult {
+    /// Runs one job according to its mode, the way the agent does. A person running a job by hand goes through
+    /// `ManualJobRun` instead, which reviews its plan.
+    public func run(_ job: Job, dryRun: Bool = false, now: Date = Date()) -> JobRunResult {
         var result: JobRunResult
         do {
             let evaluation = try evaluate(job, now: now)
-            let action: JobRunResult.Action
-            if !evaluation.isTriggered {
-                action = .notTriggered(evaluation.triggerSummary)
-            } else if manual {
-                action = .cleaned(executor.execute(plan(for: evaluation), context: .manual(confirmed: confirmed), dryRun: dryRun))
-            } else {
-                action = scheduledAction(job, evaluation: evaluation, dryRun: dryRun, now: now)
-            }
+            let action: JobRunResult.Action =
+                evaluation.isTriggered
+                ? scheduledAction(job, evaluation: evaluation, dryRun: dryRun, now: now) : .notTriggered(evaluation.triggerSummary)
             result = JobRunResult(job: job, date: now, evaluation: evaluation, action: action)
         } catch {
             result = JobRunResult(job: job, date: now, evaluation: nil, action: .failed(error.localizedDescription))
@@ -192,7 +200,7 @@ public struct JobRunner: Sendable {
             }
             return .suggested(suggestion)
         case .automatic:
-            let report = executor.execute(plan(for: evaluation), context: .automatic(automationContext(for: job)), dryRun: dryRun)
+            let report = executor.execute(AutomaticPlan(plan(for: evaluation), automation: automationContext(for: job)), dryRun: dryRun)
             // Removals happen without anyone watching, so they are always announced, whatever the setting.
             let notes = report.problemNotes
             if !dryRun && (report.freedBytes > 0 || !notes.isEmpty) {
@@ -202,9 +210,8 @@ public struct JobRunner: Sendable {
         }
     }
 
-    /// Saves when the job ran and what it found, so its schedule moves on. Front ends that run a job
-    /// themselves call this too.
-    public func record(_ result: JobRunResult) throws {
+    /// Saves when the job ran and what it found, so its schedule moves on.
+    func record(_ result: JobRunResult) throws {
         try context.jobStates.update(result.job.id) { state in
             state.lastRun = result.date
             state.lastOutcome = result.summary
@@ -258,7 +265,12 @@ public struct JobRunner: Sendable {
         var results: [JobRunResult] = []
         for job in due {
             log("Running \(job.id) (\(job.mode.rawValue))")
+            for rule in context.library.overrides where job.rules.contains(rule.id) {
+                let source = PathUtil.abbreviate(rule.source ?? RuleLibrary.inlineSource)
+                log("  Uses your rule \(rule.id) from \(source) in place of the built-in one")
+            }
             let result = run(job, now: now)
+            for issue in result.evaluation?.ruleIssues ?? [] { log("  \(issue.description)") }
             log("  \(result.summary)")
             if let problem = result.recordError { log("  \(problem)") }
             results.append(result)

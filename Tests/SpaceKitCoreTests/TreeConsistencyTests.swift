@@ -232,7 +232,7 @@ struct CapacityReportingTests {
         report.items = [
             (CleanupItem(path: "/tmp/a", size: 100), .removed(bytes: 100, trashedTo: "/Users/x/.Trash/a")),
             (CleanupItem(path: "/tmp/b", size: 50), .removed(bytes: 50, trashedTo: nil)),
-            (CleanupItem(path: "/tmp/c", size: 70), .skipped(reason: "nope")),
+            (CleanupItem(path: "/tmp/c", size: 70), .skipped(reason: "nope", kind: .refused)),
         ]
         #expect(report.freedBytes == 150)
         #expect(report.trashedBytes == 100)

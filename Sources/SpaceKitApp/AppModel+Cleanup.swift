@@ -6,7 +6,7 @@ extension AppModel {
     // MARK: Cleanup
 
     func cleanupItem(for item: DiskItem) -> CleanupItem? {
-        CleanupItem(item, markers: tree?.markers, ruleID: rule(for: item.path)?.id)
+        tree.flatMap { CleanupItem(item, in: $0, ruleID: rule(for: item.path)?.id) }
     }
 
     func addToCleanupList(_ items: [CleanupItem]) {
@@ -22,104 +22,73 @@ extension AppModel {
 
     var cleanupListBytes: UInt64 { cleanupList.reduce(0) { $0 + $1.size } }
 
-    /// Opens the review sheet for a plan, unless another cleanup is already open (it may be running).
-    func review(_ plan: CleanupPlan, title: String, completion: (@MainActor (CleanupReport) -> Void)? = nil) {
+    /// Opens the review sheet for a plan, unless another cleanup is already open (it may be running). `run` is the job run
+    /// by hand the plan belongs to.
+    func review(_ plan: CleanupPlan, title: String, run: ManualJobRun? = nil) {
         guard pendingCleanup == nil else {
             errorMessage = "Another cleanup is open. Finish or cancel it first."
             return
         }
-        pendingCleanup = PendingCleanup(title: title, plan: plan, completion: completion)
+        pendingCleanup = PendingCleanup(title: title, plan: plan, run: run)
     }
 
-    /// A plan for items picked from the map or the cleanup list, dated by the scan they came from (loose files
-    /// changed since aren't touched), moved to the Trash.
-    func manualPlan(_ items: [CleanupItem]) -> CleanupPlan {
-        CleanupPlan(items: items, useTrash: true, created: treeScanStarted)
-    }
-
-    /// When the scan behind the Dev and AI findings began. It's the Explore scan's unless the analysis scanned
-    /// the rule locations itself.
-    var analysisScanStarted: Date { analysisResult?.scanStarted ?? treeScanStarted }
-
+    /// `finding` is one of the current analysis's findings; its items carry that analysis's scan start time, which is
+    /// the Explore scan's unless the analysis scanned the rule locations itself.
     func reviewFinding(_ finding: Finding, items: [FindingItem]? = nil) {
-        let trash = context.trashPreference(for: .rule)
-        let plan = CleanupPlan.make(findings: [finding], trashPreference: trash, created: analysisScanStarted) { items ?? $0.items }
+        guard let analysis = analysis else { return }
+        let plan = CleanupPlan.make(
+            findings: [finding], trashPreference: context.trashPreference(for: .rule), scanStarted: analysis.scanStarted
+        ) { items ?? $0.items }
         review(plan, title: "Clean \(finding.rule.name)")
     }
 
-    /// The guard's verdict on everything in a plan, as the review sheet shows it before anything runs.
-    struct PlanVerdicts: Sendable {
-        var items: [(item: CleanupItem, verdict: SafetyVerdict)]
-        var commands: [(command: PlannedCommand, verdict: SafetyVerdict)]
-    }
-
-    func verdicts(for plan: CleanupPlan) async -> PlanVerdicts {
+    /// The review the sheet shows before anything runs. The guard's checks can touch the disk, so they run off the
+    /// main actor.
+    func cleanupReview(of plan: CleanupPlan) async -> CleanupReview {
         let executor = context.executor
-        return await Task.detached(priority: .userInitiated) {
-            PlanVerdicts(
-                items: plan.itemsLargestFirst.map { ($0, executor.verdict(for: $0, context: .manual(confirmed: false))) },
-                commands: plan.commands.map { ($0, executor.verdict(for: $0, context: .manual(confirmed: false))) })
-        }.value
+        return await Task.detached(priority: .userInitiated) { CleanupReview(plan, executor: executor) }.value
     }
 
     var isCleaning: Bool { runningCleanups > 0 }
 
-    /// Runs a reviewed plan, then `completion` (bookkeeping such as job state) before the app may quit.
-    /// Pass `confirmed: true` only when the person acknowledged every warning the review showed; otherwise items and
-    /// commands that need confirmation are skipped.
+    /// Runs a reviewed plan with the executor of the context current now, through `run` when it completes a job run by
+    /// hand (which records the run and settles the suggestion), and finishes that bookkeeping before the app may quit.
+    /// A plan reviewed before the settings changed comes back `reviewOutdated` with nothing done; the sheet reviews
+    /// it again.
     func execute(
-        _ plan: CleanupPlan, confirmed: Bool, completion: (@MainActor (CleanupReport) -> Void)? = nil,
-        onProgress: @escaping @Sendable (Int, Int, String) -> Void
+        _ plan: ReviewedPlan, run: ManualJobRun? = nil, onProgress: @escaping @Sendable (Int, Int, String) -> Void
     ) async -> CleanupReport {
         beginCleanup()
         defer { endCleanup() }
         let executor = context.executor
-        let report = await Task.detached(priority: .userInitiated) {
-            executor.execute(plan, context: .manual(confirmed: confirmed), dryRun: false, onProgress: onProgress)
+        let (report, outcome) = await Task.detached(priority: .userInitiated) { () -> (CleanupReport, ManualJobRun.Outcome?) in
+            guard let run else { return (executor.execute(plan, dryRun: false, onProgress: onProgress), nil) }
+            let outcome = run.complete(plan, executor: executor, onProgress: onProgress)
+            return (outcome.report, outcome)
         }.value
-        completion?(report)
-        Task {
-            await untilTreesAreFree()
-            applyRemovals(report)
-        }
+        guard !report.reviewOutdated else { return report }
+        if let outcome { finishJobRun(outcome) }
+        applyRemovals(report)
         return report
     }
 
-    /// Brings every view up to date after a cleanup without re-scanning or re-analysing everything:
-    /// the trees shrink in place, findings lose only the cleaned items, the AI report and category
-    /// totals update only if they were affected, and rules whose tool command ran are re-evaluated alone.
+    /// Brings every view up to date after a cleanup without re-scanning or re-analysing everything: the workspace
+    /// shrinks the tree and the findings in place (see `follow` for the views), and the Trash, the journal and the
+    /// volumes are measured again.
     private func applyRemovals(_ report: CleanupReport) {
+        workspace.apply(report, context: context)
         let removals = Removal.from(report)
-        applyToTreesAndFindings(removals)
-
-        // Tool commands free space their own way; re-evaluate just those rules.
-        refreshFindings(ruleIDs: report.rulesToReevaluate)
-
-        let removedPaths = Set(removals.filter { $0.kind != .looseFiles && !$0.partial }.map(\.path))
-        // A partly removed folder was rescanned: it keeps its node, but the folders inside it got new ones.
-        let rescannedPaths = removals.filter(\.partial).map(\.path)
-        let isGone: (String) -> Bool = { path in
-            removedPaths.contains { PathUtil.isAncestorOrEqual($0, of: path) }
-                || rescannedPaths.contains { PathUtil.isStrictAncestor($0, of: path) }
-        }
-        if let focus, isGone(focus.path) {
-            var survivor = focus.parent
-            while let node = survivor, isGone(node.path) { survivor = node.parent }
-            refocus(on: survivor ?? tree?.root)
-        }
-        if !removedPaths.isEmpty || removals.contains(where: { $0.kind == .looseFiles }) {
-            cleanupList.removeAll { item in
-                removedPaths.contains { PathUtil.isAncestorOrEqual($0, of: item.path) }
-                    || (item.kind == .looseFiles && removals.contains { $0.kind == .looseFiles && $0.path == item.path })
-            }
-        }
-        if let path = selection?.path, isGone(path) { selection = nil }
-        if let path = hovered?.path, isGone(path) { hovered = nil }
-
+        // Here rather than when the workspace's change lands: a new scan shown before then drops the change.
+        forgetRemoved(removals)
         refreshJournal()
         refreshVolumes()
         // Re-measure the Trash exactly (and resync it in the map) once the move has settled.
         refreshTrash(resync: report.trashedBytes > 0 || removals.contains { PathUtil.isStrictAncestor(trashPath, of: $0.path) })
         refreshSnapshots()
+    }
+
+    /// Takes what a cleanup removed off the cleanup list.
+    private func forgetRemoved(_ removals: [Removal]) {
+        cleanupList.removeAll { item in removals.contains { $0.takesAll(of: item.path, kind: item.kind) } }
     }
 }

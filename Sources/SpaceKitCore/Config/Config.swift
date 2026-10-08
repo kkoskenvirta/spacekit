@@ -81,7 +81,7 @@ public struct SafetySettings: Codable, Sendable, Equatable {
     public var maxBytesPerRun: ByteCount = .gb(100)
     /// Extra paths that may never be removed (added to the built-in list, which can't be reduced).
     public var protectedPaths: [String] = []
-    /// Extra executables rule commands may run.
+    /// Extra executables rule commands may run. Code launchers are refused (`CommandTrust.isCodeLauncher`).
     public var allowedCommands: [String] = []
 
     public init() {}

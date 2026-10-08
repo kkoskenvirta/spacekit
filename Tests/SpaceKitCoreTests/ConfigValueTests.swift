@@ -102,6 +102,76 @@ struct ConfigValueTests {
         #expect(Job.suggested(for: rule).when.keepRecent == Job.defaultActiveProjectsWindow)
     }
 
+    /// An automatic run starts a tool only from folders the person can't change, which typical installs aren't, so a job
+    /// that runs a command would skip every time: it is suggested, approved and run by hand.
+    @Test("A job suggested for a rule that runs a command starts as a suggestion, whatever the rule's policy asks")
+    func commandRulesSuggested() throws {
+        func rule(_ action: String, policy: String = "") throws -> Rule {
+            try #require(try RuleLibrary.parse(yaml: "name: x\npath: ~/.cache/x\nsafety: safe\naction:\n\(action)\n\(policy)").first)
+        }
+        let automatic = "policy:\n  mode: automatic\n"
+        #expect(Job.suggested(for: try rule("  command: [go, clean, -cache]", policy: automatic)).mode == .suggest)
+        #expect(Job.suggested(for: try rule("  command: [go, clean, -cache]")).mode == .suggest)
+        #expect(Job.suggested(for: try rule("  itemCommand: [rustup, toolchain, uninstall, \"{name}\"]")).mode == .suggest)
+        #expect(Job.suggested(for: try rule("  command: [go, clean, -cache]", policy: "policy:\n  mode: observe\n")).mode == .observe)
+        #expect(Job.suggested(for: try rule("  remove: true", policy: automatic)).mode == .automatic)
+        // Every built-in rule that runs a command.
+        for builtin in RuleLibrary.load(builtin: .embedded).rules where builtin.action.command != nil || builtin.action.itemCommand != nil {
+            #expect(Job.suggested(for: builtin).mode != .automatic, "\(builtin.id)")
+        }
+    }
+
+    @Test("safety.allowedCommands can't list shells, interpreters or other code launchers")
+    func codeLaunchersInAllowedCommands() throws {
+        let launchers = [
+            "sh", "bash", "zsh", "env", "python", "python3", "python3.12", "Python3", "perl5.30", "node", "osascript", "xargs", "find",
+            "swift", "open", "arch", "nohup", "nice", "time", "timeout", "gtimeout", "caffeinate", "sudo", "script", "expect", "xcrun",
+            "awk", "tclsh8.6", "sqlite3", "rsync", "lua5.4", "php", "R", "Rscript", "java", "jshell", "make", "git", "ssh",
+            // APFS folds case fully: /bin/baſh is /bin/bash, /usr/bin/oſaſcript is osascript.
+            "baſh", "zſh", "oſaſcript", "BAſH",
+        ]
+        for name in launchers {
+            let yaml = "safety:\n  allowedCommands: [shasum, \(name)]\n"
+            let error = #expect(throws: (any Error).self, "\(name)") { try ConfigStore.parse(yaml) }
+            let message = error.map(DecodingErrorText.describe) ?? ""
+            #expect(message.contains("safety.allowedCommands") && message.contains("'\(name)'"), "\(message)")
+            #expect(!message.contains("such as rsync"), "\(message)")
+        }
+        #expect(try ConfigStore.parse("safety:\n  allowedCommands: [pip3, shasum, my-tool_2.0+x]\n").safety.allowedCommands.count == 3)
+        #expect(CommandTrust.isCodeLauncher("pythonw"))
+        #expect(CommandTrust.isCodeLauncher("baſh") && CommandTrust.isCodeLauncher("oſaſcript") && CommandTrust.isCodeLauncher("ﬁnd"))
+        #expect(!CommandTrust.isCodeLauncher("shasum"))
+    }
+
+    @Test("safety.allowedCommands takes plain ASCII tool names only")
+    func plainAllowedCommandNames() throws {
+        for name in ["café", "tool name", "tool;x", "ｓｈ", "t\u{200B}ool", "tool*"] {
+            let yaml = "safety:\n  allowedCommands: [\"\(name)\"]\n"
+            let error = #expect(throws: (any Error).self, "\(name)") { try ConfigStore.parse(yaml) }
+            let message = error.map(DecodingErrorText.describe) ?? ""
+            #expect(message.contains("safety.allowedCommands") && message.contains("plain"), "\(message)")
+        }
+    }
+
+    @Test("A config allowing a code launcher fails closed: removals are refused like any invalid config")
+    func codeLauncherConfigFailsClosed() throws {
+        let tree = try TempTree()
+        try tree.directory("config")
+        try "safety:\n  allowedCommands: [sh]\n".write(toFile: tree.path("config/config.yaml"), atomically: true, encoding: .utf8)
+        try tree.file("work/build/x", bytes: 1000)
+        let paths = SpaceKitPaths(configFile: tree.path("config/config.yaml"), stateDirectory: tree.path("state"))
+        let context = SpaceKitContext.load(paths: paths)
+        #expect(context.configError?.contains("'sh'") == true)
+        #expect(context.config.safety.allowedCommands.isEmpty)
+        let plan = CleanupPlan(items: [CleanupItem(path: tree.path("work/build"), size: 1000)], useTrash: false)
+        // Should the refusal ever break, the item lands in the sandbox, never in the real Trash.
+        var executor = context.executor
+        executor.trash = sandboxTrash(home: tree.root)
+        let report = manualRun(plan, with: executor)
+        #expect(report.skipped.first?.reason.contains("Config file is invalid") == true)
+        #expect(onDisk(tree.path("work/build/x")))
+    }
+
     @Test("Ages convert to and from dates")
     func ageDates() {
         let now = Date(timeIntervalSince1970: 1_000_000)

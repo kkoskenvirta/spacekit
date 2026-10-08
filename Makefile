@@ -30,13 +30,13 @@ run: ## Run the app from source
 tui: ## Run the terminal UI from source on your home folder
 	$(SWIFT) run spacekit tui ~
 
-install: release ## Install the CLI to $(BINDIR) and the rule library to $(SHAREDIR)
-	@mkdir -p "$(BINDIR)" "$(SHAREDIR)"
+install: release ## Install the CLI to $(BINDIR) (the built-in rules are compiled into it)
+	@mkdir -p "$(BINDIR)"
 	install -m 755 "$$($(SWIFT) build -c release --show-bin-path)/spacekit" "$(BINDIR)/spacekit"
-	rm -rf "$(SHAREDIR)/rules" && cp -R rules "$(SHAREDIR)/rules"
 	@echo "Installed $(BINDIR)/spacekit. Make sure $(BINDIR) is on your PATH, then try: spacekit doctor"
 
-uninstall: ## Stop the background agent if it runs this CLI, remove the installed CLI and rules (your config and history stay)
+# $(SHAREDIR) holds the rule library older versions installed; nothing reads it any more.
+uninstall: ## Stop the background agent if it runs this CLI, remove the installed CLI (your config and history stay)
 	@program=$$([ -f "$(AGENT_PLIST)" ] && /usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$(AGENT_PLIST)" 2>/dev/null); \
 	installed=$$(realpath "$(BINDIR)/spacekit" 2>/dev/null); \
 	if [ -z "$$program" ]; then :; \
@@ -48,7 +48,7 @@ uninstall: ## Stop the background agent if it runs this CLI, remove the installe
 	rm -f "$(BINDIR)/spacekit"
 	rm -rf "$(SHAREDIR)"
 
-validate-rules: build ## Validate every rule file
+validate-rules: build ## Validate every built-in rule (rebuilt from rules/) and your own
 	$(SWIFT) run spacekit rules validate
 
 lint: ## Check formatting with swift-format

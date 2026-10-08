@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Builds SpaceKit.app: the SwiftUI app, the `spacekit` CLI (used by the background agent) and the rule library.
+# Builds SpaceKit.app: the SwiftUI app and the `spacekit` CLI (used by the background agent). Both have the
+# built-in rules from rules/ compiled in, so the bundle carries no rule files.
 #
 #   scripts/build-app.sh            → build/SpaceKit.app (release, ad-hoc signed)
 #   SIGN_IDENTITY="Developer ID Application: …" scripts/build-app.sh
@@ -23,7 +24,6 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Helpers" "$APP/Contents/Resources"
 cp "$BIN/SpaceKitApp" "$APP/Contents/MacOS/SpaceKit"
 # Helpers/, not MacOS/: on a case-insensitive volume "spacekit" would overwrite "SpaceKit".
 cp "$BIN/spacekit" "$APP/Contents/Helpers/spacekit"
-cp -R "$ROOT/rules" "$APP/Contents/Resources/rules"
 
 # App icon from assets/icon.svg (Quick Look renders SVG; iconutil builds the .icns).
 ICONSET="$(mktemp -d)/AppIcon.iconset"

@@ -10,7 +10,7 @@ import Foundation
 /// - a multiply-linked file's bytes are counted once, under the link a scan would credit (see `HardLinkGroup`)
 ///
 /// Mutations must happen on one thread at a time, after the scan finished, with no other thread reading the
-/// tree meanwhile (the app uses the main actor). See `DirNode` for the full threading rules.
+/// tree meanwhile (`Workspace` arranges that for the app and the TUI). See `DirNode` for the full threading rules.
 extension ScanTree {
     // MARK: Removal
 

@@ -44,7 +44,8 @@ enum AppSection: String, CaseIterable, Identifiable, Hashable {
 }
 
 /// App-wide state. Everything heavy (scans, analysis, cleanup) runs off the main actor;
-/// results are published back here.
+/// results are published back here. The Explore tree and its analysis live in `workspace`, which changes them only in
+/// steps run on the main actor, so views read the tree directly.
 @Observable
 @MainActor
 final class AppModel {
@@ -56,6 +57,8 @@ final class AppModel {
     var errorMessage: String?
 
     // MARK: Explore
+    /// Owns the tree and the analysis; `tree` and `analysisResult` show what it published last.
+    let workspace: Workspace
     private(set) var tree: ScanTree?
     private(set) var scanProgress: ScanProgress?
     private(set) var progressSnapshot: ScanProgress.Snapshot?
@@ -77,13 +80,8 @@ final class AppModel {
     private var scanTask: Task<Void, Never>?
     /// Bumped by every scan; a scan that finishes after a newer one started is dropped.
     @ObservationIgnored private var scanGeneration = 0
-    /// When the scan behind `tree` started. Plans made from it don't touch loose files changed after this.
-    @ObservationIgnored private(set) var treeScanStarted = Date()
     /// The folder the current `tree` is a scan of (`scanPath` moves on as soon as another scan starts).
     @ObservationIgnored private var treeScanPath: String?
-    /// Off-main work reading the trees, and tree changes waiting for it to finish (see `readingTrees`).
-    @ObservationIgnored private var treeReaders = 0
-    @ObservationIgnored private var treeWriters: [CheckedContinuation<Void, Never>] = []
 
     // MARK: Intelligence
     /// The latest analysis with its AI report and rule index.
@@ -93,8 +91,6 @@ final class AppModel {
     var analysis: Analysis? { analysisResult?.analysis }
     var aiReport: AIReport? { analysisResult?.aiReport }
     private(set) var analysisProgress: ScanProgress?
-    /// Bumped by every analysis; only the latest one's result is used.
-    @ObservationIgnored private var analysisGeneration = 0
 
     // MARK: Cleanup
     /// Items collected from Explore and Dev Intelligence for one combined review.
@@ -103,6 +99,8 @@ final class AppModel {
     var pendingCleanup: PendingCleanup?
     /// The job currently open in the job editor.
     var jobDraft: JobDraft?
+    /// A job run waiting for "Run Anyway".
+    var skippedRun: SkippedRun?
     /// Bumped whenever the tree changes in place, so cached map layouts are rebuilt.
     private(set) var treeRevision = 0 {
         didSet { itemsCache.removeAll() }
@@ -141,13 +139,22 @@ final class AppModel {
         let id = UUID()
         var title: String
         var plan: CleanupPlan
-        /// Called with the report after a successful run.
-        var completion: (@MainActor (CleanupReport) -> Void)?
+        /// Set for a job run by hand or a suggestion being approved: the reviewed plan completes it.
+        var run: ManualJobRun?
+    }
+
+    /// A job run by hand that would skip because the job is below its threshold; the person may run it anyway.
+    struct SkippedRun {
+        let run: ManualJobRun
+        /// The review sheet's title if they do.
+        let title: String
     }
 
     init() {
         let context = SpaceKitContext.load()
         self.context = context
+        let (steps, delivery) = AsyncStream.makeStream(of: Workspace.Step.self)
+        workspace = Workspace { delivery.yield($0) }
         scanPath = PathUtil.expand(context.config.scan.defaultPath)
         libraryIndex = context.ruleIndex
         visualization = context.config.ui.visualization
@@ -157,6 +164,7 @@ final class AppModel {
         refreshVolumes()
         refreshAutomation()
         startMonitoring()
+        runWorkspaceSteps(steps)
         AppDelegate.model = self
     }
 
@@ -170,28 +178,42 @@ final class AppModel {
     // MARK: Config
 
     /// Applies one change to the config file as it is on disk now, so changes made elsewhere (jobs added with the CLI,
-    /// hand edits) are kept, and saves it. A config file that doesn't parse is left untouched and the problem shown.
-    /// Only what changed is reloaded: the rule library only when rule settings differ.
+    /// hand edits) are kept, and saves it. A config file that doesn't parse is left untouched and the problem shown; once
+    /// it is fixed, the next change adopts it.
     func updateConfig(_ change: (inout SpaceKitConfig) -> Void) {
-        let before = context.config
-        let saved: SpaceKitConfig
         do {
-            saved = try context.configStore.update(change)
+            adopt(try context.applying(change))
         } catch let error as ConfigError {
             errorMessage =
                 "SpaceKit didn't save this change because the config file has a problem: \(error.localizedDescription). "
-                + "Fix it (spacekit config validate), then Reload."
-            return
+                + "Fix it (spacekit config validate), then try again."
         } catch {
             errorMessage = "Couldn't save the config: \(error.localizedDescription)"
-            return
         }
-        if saved.rules != before.rules || context.configError != nil {
-            reloadContext()
-        } else if saved != before {
-            context.config = saved
-            if saved.jobs != before.jobs { refreshJournal() }
+    }
+
+    /// Picks up edits made to the config file elsewhere (an editor, the CLI) while SpaceKit was in the background. A file
+    /// that became invalid stops every cleanup, so its error is shown the way Reload shows it, besides the banner, once
+    /// per new error rather than on every activation.
+    func rereadConfig() {
+        let before = context.configError
+        adopt(context.rereadingConfig())
+        if let error = context.configError, error != before { errorMessage = "Config problem: \(error)" }
+    }
+
+    /// Replaces the context with `new` and refreshes only what depends on what changed: the rule labels when rule
+    /// settings or developer roots differ (the context reloaded its library only for rule settings), the Automation
+    /// screen when jobs differ.
+    private func adopt(_ new: SpaceKitContext) {
+        let old = context
+        context = new
+        let relabelling = new.relabelling(since: old)
+        if relabelling.reindex {
+            rulesIncludingDisabledCache = nil
+            analysisResult = workspace.reindex(rules: new.library.rules).result
         }
+        if relabelling.rebuildIndex { libraryIndex = new.ruleIndex }
+        if new.config.jobs != old.config.jobs { refreshJournal() }
     }
 
     /// Writes the commented starter config if there's no config file yet, and loads it.
@@ -220,7 +242,7 @@ final class AppModel {
         rulesIncludingDisabledCache = nil
         context = SpaceKitContext.load(paths: context.paths)
         libraryIndex = context.ruleIndex
-        analysisResult?.reindex(rules: context.library.rules)
+        analysisResult = workspace.reindex(rules: context.library.rules).result
         if let error = context.configError { errorMessage = "Config problem: \(error)" }
         refreshAutomation()
     }
@@ -255,11 +277,11 @@ final class AppModel {
         history = context.history.records(since: Age.days(365).ago())
     }
 
-    /// Evaluates a job off the main actor, marking it as running meanwhile (cards show a spinner).
-    func evaluate(_ job: Job, with runner: JobRunner) async -> Result<JobEvaluation, Error> {
-        runningJobID = job.id
+    /// Prepares a job run by hand off the main actor, marking the job as running meanwhile (cards show a spinner).
+    func prepareRun(of jobID: String, _ prepare: @escaping @Sendable () throws -> ManualJobRun) async -> Result<ManualJobRun, Error> {
+        runningJobID = jobID
         defer { runningJobID = nil }
-        return await Task.detached { Result { try runner.evaluate(job) } }.value
+        return await Task.detached { Result { try prepare() } }.value
     }
 
     // MARK: Scanning
@@ -271,7 +293,6 @@ final class AppModel {
         scanTask?.cancel()
         scanGeneration += 1
         let generation = scanGeneration
-        let started = Date()
         let progress = ScanProgress()
         scanProgress = progress
         progressSnapshot = progress.snapshot
@@ -295,7 +316,7 @@ final class AppModel {
                 if tree.stats.cancelled {
                     self.stopScan()
                 } else {
-                    self.finishScan(tree, path: root, started: started)
+                    self.finishScan(tree, path: root)
                 }
             } catch {
                 guard self.scanGeneration == generation else { return }
@@ -317,15 +338,15 @@ final class AppModel {
         if let treeScanPath { scanPath = treeScanPath }
     }
 
-    private func finishScan(_ tree: ScanTree, path: String, started: Date) {
-        self.tree = tree
+    private func finishScan(_ tree: ScanTree, path: String) {
+        let shown = workspace.show(tree)
+        self.tree = shown.tree
         treeScanPath = path
-        treeScanStarted = started
         treeRevision += 1
         focus = tree.root
         scanProgress = nil
         progressSnapshot = nil
-        analysisResult = nil
+        show(shown)
         categories = CategoryBreakdown.compute(tree: tree)
         refreshVolumes()
         refreshTrash(resync: false)
@@ -372,56 +393,90 @@ final class AppModel {
 
     var isAnalysing: Bool { analysisProgress != nil }
 
-    /// Evaluates all rules, reusing the Explore scan when it covers the locations rules need. Starting again (after a
-    /// rescan, or Refresh) stops the analysis in progress and drops its result, so the current tree is always the one
-    /// analysed.
+    /// Evaluates all rules, reusing the Explore scan when it covers the locations rules need, and records a History
+    /// snapshot. Starting again (after a rescan, or Refresh) stops the analysis in progress and drops its result, so the
+    /// current tree is always the one analysed.
     func analyze() {
-        analysisProgress?.cancel()
-        analysisGeneration += 1
-        let generation = analysisGeneration
-        let progress = ScanProgress()
-        analysisProgress = progress
-        let analyzer = context.analyzer
-        let tree = self.tree
-        let window = context.config.automation.activeModelWindow
-        let rules = context.library.rules
-        let patternRoots = context.config.scan.devRoots
-        let history = context.history
-        Task {
-            let result: AnalysisResult
-            do {
-                result = try await self.readingTrees {
-                    let analysis = try await analyzer.analyze(reusing: tree, progress: progress)
-                    return AnalysisResult(analysis, rules: rules, activeModelWindow: window, patternRoots: patternRoots)
-                }
-            } catch {
-                guard self.analysisGeneration == generation else { return }
-                self.analysisProgress = nil
-                self.errorMessage = error.localizedDescription
-                return
+        analysisProgress = workspace.analyze(context)
+    }
+
+    // MARK: Workspace
+
+    /// Runs the workspace's steps on the main actor, one at a time and in order, for as long as the model lives.
+    private func runWorkspaceSteps(_ steps: AsyncStream<Workspace.Step>) {
+        Task { [weak self] in
+            for await step in steps {
+                guard let self else { return }
+                for event in step() { handle(event) }
             }
-            guard self.analysisGeneration == generation else { return }
-            self.analysisProgress = nil
-            self.analysisResult = result
-            let analysis = result.analysis
-            if let tree = self.tree, tree.covers(PathUtil.home) {
-                self.categories = CategoryBreakdown.compute(tree: tree, findings: analysis.findings)
+        }
+    }
+
+    private func handle(_ event: Workspace.Event) {
+        switch event {
+        case .analysed(let state):
+            analysisProgress = nil
+            show(state)
+            if let tree, tree.covers(PathUtil.home) {
+                categories = CategoryBreakdown.compute(tree: tree, findings: analysis?.findings ?? [])
             }
-            try? history.recordSnapshot(analysis: analysis)
-            self.refreshHistory()
+            refreshHistory()
+        case .analysisFailed(let error):
+            analysisProgress = nil
+            errorMessage = error.localizedDescription
+        case .changed(let change):
+            show(change.state)
+            follow(change)
+        case .refreshed(let state):
+            show(state)
+        }
+    }
+
+    private func show(_ state: Workspace.State) {
+        analysisResult = state.result
+        if refreshingRules != state.refreshingRules { refreshingRules = state.refreshingRules }
+    }
+
+    /// After a cleanup or a re-synced Trash: category totals and map layouts follow the tree, the map stays on its folder
+    /// or moves to the nearest one above it that's left, and selections of things that went are cleared.
+    private func follow(_ change: Workspace.Change) {
+        if change.treeChanged {
+            if change.removals.isEmpty {
+                recomputeCategories()
+            } else {
+                // Subtract instead of recomputing.
+                categories = CategoryBreakdown.subtracting(change.removals, from: categories, findings: analysis?.findings ?? [])
+            }
+            treeRevision += 1
+        }
+        if let focus, let survivor = change.survivor(of: focus), survivor !== focus {
+            self.focus = survivor
+            backStack = []
+        } else {
+            backStack.removeAll { change.survivor(of: $0) !== $0 }
+        }
+        if let path = selection?.path, change.isGone(path) { selection = nil }
+        if let path = hovered?.path, change.isGone(path) { hovered = nil }
+    }
+
+    private func recomputeCategories() {
+        if let tree, tree.roots == ["/"] || tree.covers(PathUtil.home) {
+            categories = CategoryBreakdown.compute(tree: tree, findings: analysis?.findings ?? [], capacity: scanCapacity)
         }
     }
 
     // MARK: Monitoring
 
     /// Keeps capacity live: every few seconds (one cheap system call per volume), and immediately when SpaceKit
-    /// becomes active, which is also when the Trash is re-measured (you may have emptied it in Finder).
+    /// becomes active, which is also when the Trash is re-measured (you may have emptied it in Finder) and the config
+    /// file re-read (you may have edited it).
     private func startMonitoring() {
         observers.append(
             NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) {
                 [weak self] _ in
                 MainActor.assumeIsolated {
                     guard let self else { return }
+                    self.rereadConfig()
                     self.refreshVolumes()
                     self.refreshTrash(resync: true)
                     self.refreshSnapshots()
@@ -449,12 +504,6 @@ final class AppModel {
     /// Asks the app to quit once the last running cleanup finishes.
     func quitWhenCleanupsAreDone() { quitWhenCleanupsFinish = true }
 
-    /// Moves the map to `node` with an empty back history, after the folders it held were removed.
-    func refocus(on node: DirNode?) {
-        focus = node
-        backStack = []
-    }
-
     func endCleanup() {
         runningCleanups -= 1
         if runningCleanups == 0 && quitWhenCleanupsFinish {
@@ -463,43 +512,8 @@ final class AppModel {
         }
     }
 
-    /// Shrinks the trees and findings in place after a cleanup: trashed items move into the Trash folder (they
-    /// still use space until it's emptied), the AI report and category totals update only if they were affected.
-    func applyToTreesAndFindings(_ removals: [Removal]) {
-        let exploreChanged = tree.map { Removal.apply(removals, to: $0) } ?? false
-        if var result = analysisResult, !result.apply(removals, exploreTree: tree).isEmpty { analysisResult = result }
-
-        // Categories: subtract instead of recomputing.
-        if exploreChanged {
-            categories = CategoryBreakdown.subtracting(removals, from: categories, findings: analysis?.findings ?? [])
-            treeRevision += 1
-        }
-    }
-
-    /// Re-evaluates a few rules with a targeted scan of only their locations, then merges the results.
-    func refreshFindings(ruleIDs: Set<String>) {
-        let rules = ruleIDs.compactMap { library.rule(id: $0) }
-        guard !rules.isEmpty, analysis != nil else { return }
-        refreshingRules.formUnion(ruleIDs)
-        let context = self.context
-        Task {
-            let fresh = try? await context.analyzer.analyze(rules: rules)
-            refreshingRules.subtract(ruleIDs)
-            guard let fresh else { return }
-            analysisResult?.merge(context.result(of: fresh), for: ruleIDs)
-        }
-    }
-
     func trashMeasured(_ bytes: UInt64?) {
         if trashBytes != bytes { trashBytes = bytes }
-    }
-
-    /// The trees changed in place (the Trash folder re-synced): rebuild map layouts and category totals.
-    func treesChangedInPlace() {
-        treeRevision += 1
-        if let tree, tree.roots == ["/"] || tree.covers(PathUtil.home) {
-            categories = CategoryBreakdown.compute(tree: tree, findings: analysis?.findings ?? [], capacity: scanCapacity)
-        }
     }
 
     /// Re-reads volume capacities. Values only change (and views only update) when the disk changed.
@@ -522,31 +536,7 @@ final class AppModel {
         }
     }
 
-    // MARK: Tree access
-
-    /// Runs `work` off the main actor while it reads the scan trees (rule evaluation, map layout). Trees change only
-    /// on the main actor and only while no such work runs (see `untilTreesAreFree`), because a `DirNode` can't be
-    /// read while it changes.
-    func readingTrees<T: Sendable>(_ work: @escaping @Sendable () async throws -> T) async throws -> T {
-        treeReaders += 1
-        defer { endTreeRead() }
-        return try await Task.detached(priority: .userInitiated, operation: work).value
-    }
-
-    private func endTreeRead() {
-        treeReaders -= 1
-        guard treeReaders == 0 else { return }
-        let waiting = treeWriters
-        treeWriters = []
-        for writer in waiting { writer.resume() }
-    }
-
-    /// Suspends until no off-main work reads the trees. Change them right after, without suspending in between.
-    func untilTreesAreFree() async {
-        while treeReaders > 0 {
-            await withCheckedContinuation { treeWriters.append($0) }
-        }
-    }
+    // MARK: Rules
 
     /// Every rule that loads, disabled ones included, so Settings can turn them back on. Cached until the next reload.
     func rulesIncludingDisabled() -> [Rule] {

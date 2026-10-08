@@ -122,7 +122,7 @@ func linkedTree(groups: Int, links: Int, perFolder: Int, size: UInt64 = 4_096) -
     }
     let stats = ScanStats(files: 0, directories: 0, errors: 0, duration: 0, cancelled: false)
     return ScanTree(
-        root: root, roots: ["/linked"], stats: stats, started: Date(), options: ScanOptions(), capacity: nil, hardLinks: table)
+        root: root, roots: ["/linked"], stats: stats, options: ScanOptions(), capacity: nil, scanStarted: Date(), hardLinks: table)
 }
 
 @Suite("Hard-link scale")

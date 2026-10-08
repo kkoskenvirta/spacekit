@@ -15,7 +15,7 @@ safety:
   trash: always             # always = move to Trash; rules = regenerable caches may be deleted directly
   maxBytesPerRun: 100GB     # an automatic run never removes more than this
   protectedPaths: []        # your own never-touch list, e.g. [~/Work/client-archive]
-  allowedCommands: []       # tools your own rules' commands may run; built-in rules also trust brew, docker, xcrun, npm, …
+  allowedCommands: []       # tools your own rules may run, by hand only; no shells or interpreters
 
 rules:
   disabled: []              # rule ids to ignore, e.g. [node.node-modules]

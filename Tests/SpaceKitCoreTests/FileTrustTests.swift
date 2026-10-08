@@ -39,12 +39,12 @@ struct FileTrustTests {
         try "id: mine.cache\nname: Mine\npath: ~/.mine/cache\nsafety: safe\naction: remove\n".write(
             toFile: file, atomically: true, encoding: .utf8)
         #expect(chmod(file, 0o664) == 0)
-        let library = RuleLibrary.load(builtinDirectory: nil, directories: [tree.path("rules")])
+        let library = RuleLibrary.load(builtin: BuiltinRules(files: []), directories: [tree.path("rules")])
         #expect(library.rule(id: "mine.cache") == nil)
         #expect(library.issues.contains { $0.severity == .error && $0.source == file })
 
         #expect(chmod(file, 0o644) == 0)
-        #expect(RuleLibrary.load(builtinDirectory: nil, directories: [tree.path("rules")]).rule(id: "mine.cache") != nil)
+        #expect(RuleLibrary.load(builtin: BuiltinRules(files: []), directories: [tree.path("rules")]).rule(id: "mine.cache") != nil)
     }
 
     static func mode(_ path: String) -> mode_t {
@@ -91,23 +91,26 @@ struct FileTrustTests {
         #expect(FileTrustTests.mode(file + ".bak") == 0o600)
     }
 
-    @Test("Built-in rule files may belong to whoever owns the running program; other rule files may not")
-    func builtinRulesOwnedByInstaller() throws {
+    @Test("Built-in rules aren't files anyone owns; a debug build's SPACEKIT_RULES_DIR files must still be trusted")
+    func builtinRulesNeedNoOwner() throws {
         let tree = try TempTree()
         let file = tree.path("rules/builtin.yaml")
         try tree.file("rules/builtin.yaml", bytes: 10)
-        #expect(chmod(file, 0o644) == 0)
-        let installer = getuid()
-        // As another account would see it: the file belongs to the installer, who also owns the program.
-        let user: uid_t = installer &+ 4_242
-        let program = tree.path("bin/spacekit")
-        try tree.file("bin/spacekit", bytes: 10)
-
-        #expect(FileTrust.problem(with: file, owners: FileTrust.builtinOwners(user: user, executable: program)) == nil)
-        #expect(FileTrust.problem(with: file, owners: FileTrust.owners(user: user)) == "is owned by another user")
-
         #expect(chmod(file, 0o664) == 0)
-        #expect(FileTrust.problem(with: file, owners: FileTrust.builtinOwners(user: user, executable: program)) != nil)
+        let environment = ["SPACEKIT_RULES_DIR": tree.path("rules")]
+
+        // Whoever installed SpaceKit, its built-in rules come from the binary, so no file owner or mode can refuse them.
+        let release = BuiltinRules.standard(environment: environment, debugBuild: false)
+        #expect(release.issues.isEmpty)
+        #expect(!release.files.isEmpty && release.files.allSatisfy { $0.source.hasPrefix("built-in rules/") })
+
+        // A folder standing in for them is held to the same rules as any rule file. With its only file refused it
+        // has no rules, so the embedded ones stay.
+        let debug = BuiltinRules.standard(environment: environment, debugBuild: true)
+        #expect(!debug.files.contains { $0.source == file })
+        #expect(debug.issues.first?.message == "not loaded: it can be changed by other users (group or world writable)")
+        #expect(debug.issues.count == 2)
+        #expect(FileTrust.problem(with: file, owners: FileTrust.owners(user: getuid() &+ 4_242)) == "is owned by another user")
     }
 
     /// Runs `chmod` with `arguments` (ACL edits have no Foundation API).

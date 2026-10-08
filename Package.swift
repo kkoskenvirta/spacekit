@@ -17,7 +17,15 @@ let package = Package(
     targets: [
         .target(
             name: "SpaceKitCore",
-            dependencies: [.product(name: "Yams", package: "Yams")]
+            dependencies: [.product(name: "Yams", package: "Yams")],
+            plugins: ["EmbedRules"]
+        ),
+        // Built-in rules are compiled into SpaceKitCore from rules/**/*.yaml, so no folder on disk decides them.
+        .executableTarget(name: "RuleEmbedder"),
+        .plugin(
+            name: "EmbedRules",
+            capability: .buildTool(),
+            dependencies: ["RuleEmbedder"]
         ),
         .target(
             name: "SpaceKitTUI",

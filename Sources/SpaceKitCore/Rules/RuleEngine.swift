@@ -108,11 +108,31 @@ public struct RuleEngine: Sendable {
     /// Bundles are opaque: never search inside them.
     static let bundleSuffixes = [".app", ".photoslibrary", ".bundle", ".framework", ".xcarchive", ".musiclibrary", ".tvlibrary"]
 
+    /// Problems with the rules as this engine resolved them: an override's paths it left out (`checkedOverride`).
+    public let issues: [RuleIssue]
+
     /// Rule and root paths are resolved through symlinks once here (`PathUtil.canonicalPattern`), because
     /// the scan tree holds resolved paths: a rule for `/tmp/x` must match a scan of `/tmp`, stored as `/private/tmp`.
     public init(rules: [Rule], devRoots: [String] = ScanSettings.defaultDevRoots) {
-        self.rules = rules.map(RuleEngine.canonical)
+        let checked = rules.map(RuleEngine.checkedOverride)
+        self.rules = checked.map(\.rule)
+        self.issues = checked.flatMap(\.issues)
         self.devRoots = devRoots.map { PathUtil.canonicalPattern($0) }
+    }
+
+    /// `canonical(rule)`; for an override, without the paths that no longer stay within the built-in rule it narrows
+    /// (`Rule.checkedPaths`), each with an issue.
+    static func checkedOverride(_ rule: Rule) -> (rule: Rule, issues: [RuleIssue]) {
+        var resolved = canonical(rule)
+        let checked = rule.checkedPaths()
+        resolved.paths = checked.kept
+        let issues = checked.leftOut.map { written, path in
+            let message =
+                "leaves out the path '\(written)': it leads to \(path) now, outside the built-in rule it narrows (a folder on the "
+                + "way changed since the rules were loaded)"
+            return RuleIssue(severity: .error, source: rule.source ?? RuleLibrary.inlineSource, ruleID: rule.id, message: message)
+        }
+        return (resolved, issues)
     }
 
     static func canonical(_ rule: Rule) -> Rule {

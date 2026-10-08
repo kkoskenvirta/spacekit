@@ -4,11 +4,18 @@ import Foundation
 public struct Analysis: Sendable {
     public var findings: [Finding]
     public var tree: ScanTree
+    /// Problems with the rules as the analysis resolved them (`RuleEngine.issues`).
+    public var ruleIssues: [RuleIssue]
 
-    public init(findings: [Finding], tree: ScanTree) {
+    public init(findings: [Finding], tree: ScanTree, ruleIssues: [RuleIssue] = []) {
         self.findings = findings
         self.tree = tree
+        self.ruleIssues = ruleIssues
     }
+
+    /// When the scan behind the findings started: the tree's. Findings merged in from a later targeted scan keep
+    /// this earlier time, which only ever leaves more alone.
+    public var scanStarted: Date { tree.scanStarted }
 
     public func findings(_ level: SafetyLevel) -> [Finding] { findings.filter { $0.safety == level } }
 
@@ -98,9 +105,10 @@ public struct StorageAnalyzer: Sendable {
     }
 
     private func evaluate(_ plan: Plan, on tree: ScanTree) -> Analysis {
-        guard !plan.roots.isEmpty else { return Analysis(findings: [], tree: tree) }
+        let issues = plan.engine.issues
+        guard !plan.roots.isEmpty else { return Analysis(findings: [], tree: tree, ruleIssues: issues) }
         let findings = plan.engine.evaluate(tree)
-        guard let selected = plan.selected else { return Analysis(findings: findings, tree: tree) }
-        return Analysis(findings: findings.filter { selected.contains($0.rule.id) }, tree: tree)
+        guard let selected = plan.selected else { return Analysis(findings: findings, tree: tree, ruleIssues: issues) }
+        return Analysis(findings: findings.filter { selected.contains($0.rule.id) }, tree: tree, ruleIssues: issues)
     }
 }

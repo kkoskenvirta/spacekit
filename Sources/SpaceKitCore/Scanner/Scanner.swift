@@ -77,8 +77,8 @@ public struct Scanner: Sendable {
             cancelled: progress.isCancelled
         )
         return ScanTree(
-            root: root, roots: resolved, stats: stats, started: started, options: options,
-            capacity: VolumeCapacity.of(path: resolved[0]), hardLinks: hardLinks
+            root: root, roots: resolved, stats: stats, options: options,
+            capacity: VolumeCapacity.of(path: resolved[0]), scanStarted: started, hardLinks: hardLinks
         )
     }
 

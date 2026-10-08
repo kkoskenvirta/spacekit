@@ -9,8 +9,11 @@ struct RuleScope: Sendable {
     /// Where pattern rules without their own `roots` look (the config's `scan.devRoots`).
     let patternRoots: [String]
 
+    /// An override's paths count only while they stay within the built-in rule it narrows (`Rule.checkedPaths`), so a
+    /// symlink retargeted since the rules loaded can't hand the rule's trust to wherever it leads now.
     func contains(_ path: String, rule: Rule) -> Bool {
-        if rule.paths.contains(where: { PathUtil.isInside(path, pattern: resolve($0)) }) { return true }
+        let paths = rule.checkedPaths(home: home).kept.map { PathUtil.expand($0, home: home) }
+        if paths.contains(where: { PathUtil.isInside(path, pattern: $0) }) { return true }
         guard let match = rule.match, match.names.contains(PathUtil.lastComponent(path)) else { return false }
         let roots = (match.roots ?? patternRoots).map(resolve)
         guard roots.contains(where: { PathUtil.isAncestorOrEqual($0, of: path) }) else { return false }

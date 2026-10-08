@@ -114,7 +114,7 @@ private struct ToolCard: View {
     }
 
     private func remove(_ item: AIModel) {
-        guard let plan = CleanupPlan.removing(item, created: model.analysisScanStarted) else { return }
+        guard let analysis = model.analysis, let plan = CleanupPlan.removing(item, scanStarted: analysis.scanStarted) else { return }
         model.review(plan, title: "Remove \(item.name)")
     }
 }

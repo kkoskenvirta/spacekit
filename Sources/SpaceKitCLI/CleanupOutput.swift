@@ -3,25 +3,72 @@ import Foundation
 import SpaceKitCore
 import SpaceKitTUI
 
+/// `--yes` and `--accept-warnings`, the go-ahead of every command that removes things.
+struct AcknowledgementOptions: ParsableArguments {
+    @Flag(
+        name: [.short, .long],
+        help: "Go ahead without asking. Only what the guard allows outright runs unless you add --accept-warnings.")
+    var yes = false
+    @Flag(name: .long, help: "With --yes, also remove the items whose warnings the preview printed.")
+    var acceptWarnings = false
+
+    func validate() throws {
+        if acceptWarnings && !yes { throw ValidationError("--accept-warnings goes with --yes.") }
+    }
+}
+
 /// How every command that removes things shows its plan and its result.
 enum CleanupOutput {
-    /// One line per item and command with the verdict `context` gets, followed by the guard's reasons for
-    /// anything that isn't simply allowed, and the manual steps.
-    static func planLines(_ plan: CleanupPlan, executor: CleanupExecutor, context: CleanupContext, limit: Int = .max) -> [String] {
-        var lines: [String] = []
-        let items = plan.itemsLargestFirst
-        for item in items.prefix(limit) {
-            let label = item.kind == .looseFiles ? "files in " + Output.path(item.path) : Output.path(item.path)
-            lines += verdictLines(executor.verdict(for: item, context: context), Output.size(item.size) + "  " + label)
+    /// Every row of a plan with the verdict a preview shows for it, largest item first: the review's own, or for
+    /// `jobs show` the verdicts an automatic run gets. The text preview and the JSON plan both print these.
+    struct Verdicts {
+        var items: [(CleanupItem, SafetyVerdict)]
+        var commands: [(PlannedCommand, SafetyVerdict)]
+        var manualSteps: [String]
+        var useTrash: Bool
+        /// What the rows that may run add up to: the review's selection, or what `context` lets run without anyone
+        /// accepting a warning. Blocked rows never count.
+        var totalBytes: UInt64
+
+        /// The review as a person sees it, so the warnings they accept are exactly the ones printed.
+        init(_ review: CleanupReview) {
+            items = review.items.map { ($0.subject, $0.verdict) }
+            commands = review.commands.map { ($0.subject, $0.verdict) }
+            manualSteps = review.manualSteps
+            useTrash = review.useTrash
+            totalBytes = review.itemBytes &+ review.commandBytes
         }
-        if items.count > limit { lines.append("  … \(items.count - limit) more".dim) }
-        for command in plan.commands {
+
+        /// The plan with the verdicts `context` gets, such as an automatic run's.
+        init(_ plan: CleanupPlan, executor: CleanupExecutor, context: CleanupContext) {
+            items = plan.itemsLargestFirst.map { ($0, executor.verdict(for: $0, context: context)) }
+            commands = plan.commands.map { ($0, executor.verdict(for: $0, context: context)) }
+            manualSteps = plan.manualSteps
+            useTrash = plan.useTrash
+            // An automatic run acknowledges nothing, so only what the guard allows outright runs.
+            func runs(_ verdict: SafetyVerdict) -> Bool { context.isAutomatic ? verdict.decision == .allow : !verdict.isBlocked }
+            totalBytes =
+                items.filter { runs($0.1) }.reduce(0) { $0 &+ $1.0.size }
+                &+ commands.filter { runs($0.1) }.reduce(0) { $0 &+ $1.0.estimatedBytes }
+        }
+    }
+
+    /// One line per item and command with its verdict, followed by the guard's reasons for anything that isn't
+    /// simply allowed, and the manual steps. At most `limit` items are listed.
+    static func planLines(_ verdicts: Verdicts, limit: Int = .max) -> [String] {
+        var lines: [String] = []
+        for (item, verdict) in verdicts.items.prefix(limit) {
+            let label = item.kind == .looseFiles ? "files in " + Output.path(item.path) : Output.path(item.path)
+            lines += verdictLines(verdict, Output.size(item.size) + "  " + label)
+        }
+        if verdicts.items.count > limit { lines.append("  … \(verdicts.items.count - limit) more".dim) }
+        for (command, verdict) in verdicts.commands {
             let text =
                 "$ ".fg(ANSI.accent) + Output.safe(command.displayString) + "  "
                 + "(frees up to \(ByteCount.format(command.estimatedBytes)); the tool decides what's unused)".dim
-            lines += verdictLines(executor.verdict(for: command, context: context), text)
+            lines += verdictLines(verdict, text)
         }
-        lines += plan.manualSteps.map { "  → ".dim + Output.safe($0) }
+        lines += verdicts.manualSteps.map { "  → ".dim + Output.safe($0) }
         return lines
     }
 
@@ -55,51 +102,79 @@ enum CleanupOutput {
             case .failed(let reason):
                 lines.append("  ✗ ".fg(ANSI.protected) + Output.safe(entry.command.displayString) + ": " + Output.safe(reason))
                 lines += entry.output.split(separator: "\n").suffix(5).map { "    " + Output.safe(String($0)).dim }
-            case .skipped(let reason):
+            case .skipped(let reason, _):
                 lines.append("  skipped ".dim + Output.safe(entry.command.displayString) + ": " + Output.safe(reason).dim)
             case .removed, .wouldRemove:
                 break
             }
         }
+        lines += report.notes.map { "  skipped ".dim + Output.safe($0).dim }
         lines += report.warnings.map { "  ! ".fg(ANSI.review) + Output.safe($0) }
         return lines
     }
 
-    /// Shows the plan with the guard's verdicts, gets the go-ahead (`yes`, or a question when `interactive`) and
-    /// runs it. Returns the report, or `nil` when nothing ran.
-    ///
-    /// Items that need confirmation are confirmed only here, after their warnings were printed and the person
-    /// agreed. With `json`, stdout carries only JSON: the plan alone without `yes`, else the plan and the result;
-    /// the human preview then goes to stderr.
+    /// Prints the review of `plan`, gets the go-ahead and runs it through `executor`. Returns the report, or `nil` when
+    /// nothing ran.
     static func session(
-        _ plan: CleanupPlan, executor: CleanupExecutor, yes: Bool, json: Bool, interactive: Bool, heading: String = "Cleanup preview",
-        verb: String = "Clean", hint: String
+        _ plan: CleanupPlan, executor: CleanupExecutor, acknowledgement: AcknowledgementOptions, json: Bool, interactive: Bool,
+        heading: String = "Cleanup preview", verb: String = "Clean", hint: String
     ) throws -> CleanupReport? {
-        let review = CleanupContext.manual(confirmed: false)
-        let planJSON = json ? PlanJSON(plan: plan, executor: executor, context: review) : nil
-        if let planJSON, !yes {
+        try session(
+            plan, executor: executor, acknowledgement: acknowledgement, json: json, interactive: interactive, heading: heading,
+            verb: verb, hint: hint, run: { executor.execute($0, dryRun: false) }, report: { $0 })
+    }
+
+    /// Prints the review of `plan` made with `executor`, gets the go-ahead and runs the reviewed plan through `run`
+    /// (a manual job run completes it with the same executor). Returns what `run` returned, or `nil` when nothing ran;
+    /// `report` reads the cleanup report from it.
+    ///
+    /// Warnings are accepted only here, after the preview printed them: by `--accept-warnings` next to `--yes`, or by
+    /// answering the question when `interactive`. `--yes` alone runs only what the guard allows outright; the rows with
+    /// warnings are still handed to the executor, which reports each as not accepted, so the result lists them and the
+    /// command exits nonzero (`exitIfProblems`). With `json`, stdout carries only JSON: the plan alone without `--yes`,
+    /// else the plan and the result, always; the preview then goes to stderr.
+    static func session<Ran>(
+        _ plan: CleanupPlan, executor: CleanupExecutor, acknowledgement: AcknowledgementOptions, json: Bool, interactive: Bool,
+        heading: String, verb: String = "Clean", hint: String, run: (ReviewedPlan) -> Ran, report: (Ran) -> CleanupReport
+    ) throws -> Ran? {
+        let review = CleanupReview(plan, executor: executor)
+        let planJSON = json ? PlanJSON(review) : nil
+        if let planJSON, !acknowledgement.yes {
             try Output.json(RunJSON(plan: planJSON))
             return nil
         }
-        Output.emit([heading.bold] + planLines(plan, executor: executor, context: review), toStandardError: json)
-        let preview = executor.execute(plan, context: .manual(confirmed: true), dryRun: true)
-        let wouldAct = preview.items.contains { $0.outcome.isWouldRemove } || preview.commands.contains { $0.outcome.isWouldRemove }
-        guard wouldAct else {
+        Output.emit([heading.bold] + planLines(Verdicts(review)), toStandardError: json)
+        guard !review.isEmpty else {
             Output.emit(["Nothing in this plan can be removed.".dim], toStandardError: json)
-            if let planJSON { try Output.json(RunJSON(plan: planJSON)) }
+            // Here `json` comes with `--yes`: the result says nothing ran.
+            if let planJSON { try Output.json(RunJSON(plan: planJSON, result: ReportJSON(CleanupReport(dryRun: false)))) }
             return nil
         }
-        guard yes || (interactive && Output.confirm("\n" + question(plan, preview: preview, verb: verb))) else {
-            print("\n" + hint.dim)
-            return nil
-        }
-        let report = executor.execute(plan, context: .manual(confirmed: true), dryRun: false)
-        if let planJSON {
-            try Output.json(RunJSON(plan: planJSON, result: ReportJSON(report)))
+        Output.emit([""] + summaryLines(review), toStandardError: json)
+        // What it cleans and where it goes is on the lines above; the question says when yes accepts the warnings.
+        let question = "\n\(verb) now" + (review.needsAcknowledgement ? ", accepting the warnings above?" : "?")
+        let acceptingWarnings: Bool
+        if acknowledgement.yes {
+            acceptingWarnings = acknowledgement.acceptWarnings
+        } else if interactive && Output.confirm(question) {
+            acceptingWarnings = true
         } else {
-            Output.emit([""] + reportLines(report))
+            let warnings = review.needsAcknowledgement ? " Items with warnings also need --accept-warnings." : ""
+            print("\n" + (hint + warnings).dim)
+            return nil
         }
-        return report
+        if review.needsAcknowledgement && !acceptingWarnings {
+            let count = review.warningCount
+            let note = "\(count) with warnings not accepted, so left alone; add --accept-warnings to run them too."
+            Output.emit([note.fg(ANSI.review)], toStandardError: json)
+        }
+        let ran = run(review.acknowledge(acceptingWarnings: acceptingWarnings))
+        if let planJSON {
+            try Output.json(RunJSON(plan: planJSON, result: ReportJSON(report(ran))))
+        } else {
+            Output.emit([""] + reportLines(report(ran)))
+        }
+        return ran
     }
 
     /// Ends the command with a nonzero status when the run didn't do everything it was asked to.
@@ -107,18 +182,10 @@ enum CleanupOutput {
         if report.hasProblems { throw ExitCode(1) }
     }
 
-    /// "Clean 1.2 GB to the Trash and run 1 tool command?"
-    static func question(_ plan: CleanupPlan, preview: CleanupReport, verb: String = "Clean") -> String {
-        let itemBytes = preview.items.reduce(UInt64(0)) { total, entry in
-            if case .wouldRemove(let bytes) = entry.outcome { return total + bytes }
-            return total
-        }
-        let commands = preview.commands.filter { $0.outcome.isWouldRemove }.count
-        let parts = [
-            itemBytes > 0 ? ByteCount.format(itemBytes) + (plan.useTrash ? " to the Trash" : " permanently") : "",
-            commands > 0 ? "run \(commands) tool command\(commands == 1 ? "" : "s")" : "",
-        ]
-        return "\(verb) " + parts.filter { !$0.isEmpty }.joined(separator: " and ") + "?"
+    /// Where the selected items go and what the selected commands do, in the review's own words.
+    static func summaryLines(_ review: CleanupReview) -> [String] {
+        let disposal = review.disposalSummary.map { review.disposal.isPermanent ? $0.bold.fg(ANSI.protected) : $0.bold }
+        return [disposal, review.commandSummary].compactMap { $0 }
     }
 }
 
@@ -154,20 +221,22 @@ struct PlanJSON: Encodable {
     var commands: [Command]
     var manualSteps: [String]
 
-    init(plan: CleanupPlan, executor: CleanupExecutor, context: CleanupContext) {
-        useTrash = plan.useTrash
-        totalBytes = plan.totalBytes
-        items = plan.items.map { item in
-            Item(
-                path: item.path, kind: item.kind.rawValue, bytes: item.size, rule: item.ruleID,
-                verdict: VerdictJSON(executor.verdict(for: item, context: context)))
+    /// The plan a person reviews, with the verdicts the review shows.
+    init(_ review: CleanupReview) {
+        self.init(CleanupOutput.Verdicts(review))
+    }
+
+    init(_ verdicts: CleanupOutput.Verdicts) {
+        useTrash = verdicts.useTrash
+        totalBytes = verdicts.totalBytes
+        items = verdicts.items.map { item, verdict in
+            Item(path: item.path, kind: item.kind.rawValue, bytes: item.size, rule: item.ruleID, verdict: VerdictJSON(verdict))
         }
-        commands = plan.commands.map { command in
+        commands = verdicts.commands.map { command, verdict in
             Command(
-                rule: command.ruleID, arguments: command.arguments, estimatedBytes: command.estimatedBytes,
-                verdict: VerdictJSON(executor.verdict(for: command, context: context)))
+                rule: command.ruleID, arguments: command.arguments, estimatedBytes: command.estimatedBytes, verdict: VerdictJSON(verdict))
         }
-        manualSteps = plan.manualSteps
+        manualSteps = verdicts.manualSteps
     }
 }
 
@@ -181,7 +250,7 @@ struct OutcomeJSON: Encodable {
         switch outcome {
         case .removed(let bytes, let trashedTo): (status, self.bytes, self.trashedTo) = ("removed", bytes, trashedTo)
         case .wouldRemove(let bytes): (status, self.bytes) = ("wouldRemove", bytes)
-        case .skipped(let reason): (status, self.reason) = ("skipped", reason)
+        case .skipped(let reason, _): (status, self.reason) = ("skipped", reason)
         case .failed(let reason): (status, self.reason) = ("failed", reason)
         }
     }
@@ -206,6 +275,8 @@ struct ReportJSON: Encodable {
     var items: [Item]
     var commands: [Command]
     var warnings: [String]
+    /// Files left on purpose inside items that were removed (`CleanupReport.notes`); not problems.
+    var notes: [String]
 
     init(_ report: CleanupReport) {
         ok = !report.hasProblems
@@ -216,6 +287,7 @@ struct ReportJSON: Encodable {
         items = report.items.map { Item(path: $0.item.path, kind: $0.item.kind.rawValue, outcome: OutcomeJSON($0.outcome)) }
         commands = report.commands.map { Command(arguments: $0.command.arguments, outcome: OutcomeJSON($0.outcome), output: $0.output) }
         warnings = report.warnings
+        notes = report.notes
     }
 }
 

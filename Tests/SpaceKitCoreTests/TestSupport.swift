@@ -90,3 +90,32 @@ func withUmask<T>(_ mask: mode_t, _ body: () throws -> T) throws -> T {
         return try body()
     }
 }
+
+extension SafetyGuard {
+    /// The guard's verdict on `path` as the disk has it now, with the facts a test names. Production code builds the
+    /// target itself and must say what it knows about repositories and size; tests default them.
+    func check(
+        _ path: String, size: UInt64 = 0, rule: Rule? = nil, context: CleanupContext, isRepository: Bool = false,
+        containsRepository: Bool = false
+    ) -> SafetyVerdict {
+        let target = RemovalTarget.at(
+            path, home: home, size: size, isRepository: isRepository, containsRepository: containsRepository,
+            probingRepositories: false)
+        return evaluate(target, rule: rule, context: context)
+    }
+}
+
+/// What a removal target would pin for `path`: its device and inode, not following a final symlink.
+func identity(_ path: String) -> RemovalTarget.Identity? {
+    var st = stat()
+    return lstat(path, &st) == 0 ? RemovalTarget.Identity(st) : nil
+}
+
+/// A developer folder with `simctl` in `tree`, and a link to it like `/var/db/xcode_select_link`, for an executor's
+/// `developerFolderLink`: which developer folder this Mac's xcode-select chose isn't what a test is about.
+func standInDeveloperFolder(_ tree: TempTree) throws -> String {
+    try tree.file("Developer/usr/bin/simctl", bytes: 16)
+    let link = tree.path("xcode_select_link")
+    try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: tree.path("Developer"))
+    return link
+}

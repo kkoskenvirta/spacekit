@@ -19,20 +19,20 @@ public enum Trash {
     }
 
     /// Permanently deleting what `scan` (a scan of the Trash) found: each entry at the top of the Trash, and the
-    /// files directly inside it. `created` is when the scan started; the executor leaves anything that arrived
+    /// files directly inside it. Each item carries the scan's start time; the executor leaves anything that arrived
     /// after it, since that wasn't in the preview. Empty when the Trash holds nothing with any size.
-    public static func emptyingPlan(_ scan: ScanTree, rules: [Rule], created: Date, home: String = PathUtil.home) -> CleanupPlan {
+    public static func emptyingPlan(_ scan: ScanTree, rules: [Rule], home: String = PathUtil.home) -> CleanupPlan {
         let root = scan.root
         let ruleID = Trash.rules(in: rules, home: home).first?.id
-        var plan = CleanupPlan(useTrash: false, created: created)
+        var plan = CleanupPlan(useTrash: false)
         plan.items = root.children.filter { $0.size > 0 }.map {
-            CleanupItem(path: $0.path, kind: .directory, name: $0.name, size: $0.size, ruleID: ruleID)
+            CleanupItem(path: $0.path, kind: .directory, name: $0.name, size: $0.size, ruleID: ruleID, scanStarted: scan.scanStarted)
         }
         if root.directFileSize > 0 {
             plan.items.append(
                 CleanupItem(
                     path: root.path, kind: .looseFiles, name: "Files in the Trash", size: root.directFileSize, ruleID: ruleID,
-                    looseFileNames: FindingItem.plainFileNames(in: root.path)))
+                    looseFileNames: FindingItem.plainFileNames(in: root.path), scanStarted: scan.scanStarted))
         }
         return plan
     }

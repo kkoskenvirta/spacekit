@@ -18,7 +18,7 @@ struct AIModelRemovalTests {
     }
 
     func outcome(_ tree: TempTree, rule: Rule, plan: CleanupPlan, confirmed: Bool = true, root: Bool = false) -> CleanupOutcome? {
-        sandboxExecutor(tree, rules: [rule], root: root).execute(plan, context: .manual(confirmed: confirmed), dryRun: true)
+        manualRun(plan, with: sandboxExecutor(tree, rules: [rule], root: root), acceptingWarnings: confirmed, dryRun: true)
             .commands.first?.outcome
     }
 
@@ -42,13 +42,13 @@ struct AIModelRemovalTests {
         let without = try #require(AIInspector.ollamaModels(finding: Finding(rule: rule(tree, removeCommand: nil), items: [item])).first)
         #expect(without.removeCommand == nil)
         #expect(!without.isRemovable)
-        #expect(CleanupPlan.removing(without) == nil)
+        #expect(CleanupPlan.removing(without, scanStarted: Date()) == nil)
     }
 
     @Test("A model with a command plans that command, which passes the executor's gates")
     func commandPlan() throws {
         let tree = try TempTree()
-        let plan = try #require(CleanupPlan.removing(model()))
+        let plan = try #require(CleanupPlan.removing(model(), scanStarted: Date()))
         #expect(plan.items.isEmpty)
         let command = try #require(plan.commands.first)
         #expect(command.arguments == ["swift", "llama:8b"])
@@ -70,7 +70,7 @@ struct AIModelRemovalTests {
     @Test("Arguments that don't match the rule's template for the model are refused")
     func forgedArguments() throws {
         let tree = try TempTree()
-        var plan = try #require(CleanupPlan.removing(model()))
+        var plan = try #require(CleanupPlan.removing(model(), scanStarted: Date()))
         plan.commands[0].arguments = ["swift", "other:1b"]
         #expect(isSkipped(outcome(tree, rule: rule(tree), plan: plan)))
     }
@@ -78,7 +78,7 @@ struct AIModelRemovalTests {
     @Test("A model name that looks like an option is refused")
     func optionLikeName() throws {
         let tree = try TempTree()
-        let plan = try #require(CleanupPlan.removing(model(name: "--version", command: ["swift", "--version"])))
+        let plan = try #require(CleanupPlan.removing(model(name: "--version", command: ["swift", "--version"]), scanStarted: Date()))
         #expect(isSkipped(outcome(tree, rule: rule(tree), plan: plan)))
     }
 
@@ -87,17 +87,18 @@ struct AIModelRemovalTests {
         let tree = try TempTree()
         let file = try tree.file("hub/a.bin", bytes: 8_000)
         try tree.directory("hub/b")
-        let single = try #require(CleanupPlan.removing(model(name: "org/model", command: nil, paths: [tree.path("hub/b")])))
+        let named = model(name: "org/model", command: nil, paths: [tree.path("hub/b")])
+        let single = try #require(CleanupPlan.removing(named, scanStarted: Date()))
         #expect(single.items.map(\.kind) == [.directory])
         #expect(single.items.first?.name == "org/model")
         #expect(single.items.first?.size == 500)
         #expect(single.useTrash)
 
-        let several = try #require(CleanupPlan.removing(model(command: nil, paths: [file, tree.path("hub/b")])))
+        let several = try #require(CleanupPlan.removing(model(command: nil, paths: [file, tree.path("hub/b")]), scanStarted: Date()))
         #expect(several.items.map(\.kind) == [.file, .directory])
         #expect(several.items.map(\.name) == ["a.bin", "b"])
         #expect(several.items.first?.size == tree.allocated("hub/a.bin"))
-        #expect(CleanupPlan.removing(model(command: nil, paths: [])) == nil)
+        #expect(CleanupPlan.removing(model(command: nil, paths: []), scanStarted: Date()) == nil)
     }
 
     @Test("ai.removeCommand is validated like other commands and can't use {path}")
@@ -131,11 +132,11 @@ struct AIModelRemovalTests {
         let scanned = try scan(tree.root)
         let findings = RuleEngine(rules: [cache, models]).evaluate(scanned)
         let model = try #require(AIInspector.report(findings: findings, tree: scanned).tools.first?.models.first)
-        let plan = try #require(CleanupPlan.removing(model, useTrash: false))
+        let plan = try #require(CleanupPlan.removing(model, useTrash: false, scanStarted: scanned.scanStarted))
         #expect(plan.items.map(\.kind).sorted { $0.rawValue < $1.rawValue } == [.directory, .looseFiles])
         #expect(plan.items.allSatisfy { $0.size > 0 })
 
-        let report = sandboxExecutor(tree, rules: [cache, models]).execute(plan, context: .manual(confirmed: true), dryRun: false)
+        let report = manualRun(plan, with: sandboxExecutor(tree, rules: [cache, models]))
         #expect(report.removedAnything)
         #expect(onDisk(tree.path("home/tool/models/m.bin")))
         #expect(!onDisk(tree.path("home/tool/loose.log")))
@@ -153,10 +154,10 @@ struct AIModelRemovalTests {
         let findings = RuleEngine(rules: [rule]).evaluate(scanned)
         let models = AIInspector.report(findings: findings, tree: scanned).tools.first?.models ?? []
         let remainder = try #require(models.first { $0.kind == .cache })
-        let plan = try #require(CleanupPlan.removing(remainder, useTrash: false))
+        let plan = try #require(CleanupPlan.removing(remainder, useTrash: false, scanStarted: scanned.scanStarted))
         #expect(plan.totalBytes == remainder.size)
 
-        _ = sandboxExecutor(tree, rules: [rule]).execute(plan, context: .manual(confirmed: true), dryRun: false)
+        _ = manualRun(plan, with: sandboxExecutor(tree, rules: [rule]))
         #expect(onDisk(tree.path("home/hf/hub/models--org--name/blob.bin")))
         #expect(!onDisk(tree.path("home/hf/hub/.locks")))
         #expect(!onDisk(tree.path("home/hf/token.cache")))

@@ -74,3 +74,22 @@ extension DiskItem {
         return nil
     }
 }
+
+/// The first entries of a list a front end shortens, and how many it leaves out, for "… 4 more".
+public struct Excerpt<Element> {
+    public let shown: [Element]
+    public let more: Int
+
+    public init(_ entries: [Element], first limit: Int) {
+        shown = Array(entries.prefix(limit))
+        more = entries.count - shown.count
+    }
+
+    /// "N more", followed by `noun` if given, or nil when nothing was left out.
+    public func moreText(_ noun: String? = nil) -> String? {
+        guard more > 0 else { return nil }
+        return ["\(more) more", noun].compactMap { $0 }.joined(separator: " ")
+    }
+}
+
+extension Excerpt: Sendable where Element: Sendable {}
