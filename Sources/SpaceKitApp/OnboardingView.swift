@@ -100,18 +100,8 @@ struct OnboardingView: View {
                 "Use the Settings window, or edit a YAML file you can keep in your dotfiles. Both change the same file, and the command-line tool and terminal UI read it too."
             )
             .foregroundStyle(.secondary)
-            Text(PathUtil.abbreviate(model.context.paths.configFile)).font(.callout.monospaced())
-            HStack {
-                Button("Create Starter Config") {
-                    _ = try? model.context.configStore.initialize()
-                    model.reloadContext()
-                }
-                .disabled(model.context.configStore.exists)
-                Button("Open in Editor") {
-                    _ = try? model.context.configStore.initialize()
-                    NSWorkspace.shared.open(URL(fileURLWithPath: model.context.paths.configFile))
-                }
-            }
+            Text(PathUtil.abbreviate(model.paths.configFile)).font(.callout.monospaced())
+            HStack { ConfigFileButtons() }
             Text(
                 "The starter config includes three example jobs (Xcode DerivedData, stale node_modules, package caches). They only run once you install the background agent in Automation."
             )

@@ -16,40 +16,41 @@ struct ScanCommand: ParsableCommand {
     var depth: Int = 1
     @Option(name: .shortAndLong, help: "Entries to show per folder.")
     var top: Int = 15
-    @Option(name: .long, help: "Hide entries smaller than this (e.g. 100MB).")
-    var minSize: String?
+    @Option(name: .long, help: "Hide entries smaller than this (e.g. 100MB).", transform: Parse.size)
+    var minSize: ByteCount?
     @Flag(name: .long, help: "Track every file individually (uses more memory).")
     var allFiles = false
     @Flag(name: .long, help: "Machine-readable output.")
     var json = false
 
+    func validate() throws {
+        guard depth >= 1 else { throw ValidationError("--depth must be 1 or more") }
+        guard top >= 1 else { throw ValidationError("--top must be 1 or more") }
+    }
+
     func run() throws {
         let context = global.loadContext()
         var options = context.scanOptions
         if allFiles { options.minFileSize = 0 }
-        let minimum =
-            try minSize.map { text -> UInt64 in
-                guard let size = ByteCount.parse(text) else { throw ValidationError("Invalid size '\(text)'") }
-                return size.bytes
-            } ?? 0
+        let minimum = minSize?.bytes ?? 0
         let tree = try ProgressReporter.run("Scanning") { try Scanner(options: options).scan(path, progress: $0) }
-        let index = RuleIndex(rules: context.library.rules)
+        let index = context.ruleIndex
 
         if json {
             try Output.json(ScanJSON(tree: tree, depth: depth, top: top, minSize: minimum))
             return
         }
         let root = tree.root
-        let volume = tree.capacity.map { "\($0.name)  ·  " } ?? ""
-        Output.print(
-            "\(volume)\(PathUtil.abbreviate(root.path))  ·  " + "\(ByteCount.format(root.size))".bold
+        let volume = tree.capacity.map { "\(Output.safe($0.name))  ·  " } ?? ""
+        print(
+            "\(volume)\(Output.path(root.path))  ·  " + "\(ByteCount.format(root.size))".bold
                 + " in \(tree.stats.files.formatted()) files  ·  scanned in \(String(format: "%.1f", tree.stats.duration))s".dim)
         if tree.stats.errors > 0 {
-            Output.print(
+            print(
                 "\(tree.stats.errors) folders couldn't be read. Grant Full Disk Access to your terminal for complete results (spacekit doctor)."
                     .fg(ANSI.review))
         }
-        Output.print()
+        print()
         printLevel(root, prefix: "", level: 1, index: index, minimum: minimum, parentSize: root.size)
     }
 
@@ -60,17 +61,11 @@ struct ScanCommand: ParsableCommand {
         for (offset, item) in shown.enumerated() {
             let last = offset == shown.count - 1 && items.count <= top
             let branch = depth > 1 ? (last ? "└─ " : "├─ ") : ""
-            let name = item.name + (item.isDirectory ? "/" : "")
+            let name = Output.safe(item.name) + (item.isDirectory ? "/" : "")
             let percent = ANSI.pad(String(format: "%.0f%%", Double(item.size) / Double(max(parentSize, 1)) * 100), to: 4, alignRight: true)
-            var annotation = ""
-            if let path = item.path, let rule = index.rule(for: path) {
-                annotation = "  " + rule.safety.level.badge + " " + rule.name.dim
-            } else if let directory = item.directory {
-                if directory.flags.contains(.unreadable) { annotation = "  no access".fg(ANSI.review) }
-                if directory.flags.contains(.firmlinkDuplicate) { annotation = "  (same as /\(directory.name))".dim }
-            }
+            let annotation = item.note(rule: item.path.flatMap(index.rule(for:))).map { "  " + $0.terminalText } ?? ""
             let bar = ANSI.bar(fraction: Double(item.size) / largest, width: 16, color: ANSI.branches[offset % ANSI.branches.count])
-            Output.print(
+            print(
                 Output.size(item.size) + "  " + bar + " " + percent + "  " + prefix.dim + branch.dim + (item.isDirectory ? name.bold : name)
                     + annotation)
             if level < depth, let directory = item.directory, !directory.children.isEmpty {
@@ -81,7 +76,7 @@ struct ScanCommand: ParsableCommand {
         }
         if items.count > top {
             let rest = items.dropFirst(top).reduce(0) { $0 + $1.size }
-            Output.print(
+            print(
                 Output.size(rest) + "  " + String(repeating: " ", count: 22) + prefix.dim + "└─ ".dim + "\(items.count - top) more".dim)
         }
     }
@@ -150,18 +145,18 @@ struct DiskCommand: ParsableCommand {
         if !json {
             for capacity in capacities {
                 let fraction = capacity.usedFraction
-                let color: UInt8 = fraction > 0.9 ? ANSI.protected : fraction > 0.75 ? ANSI.review : ANSI.accent
-                Output.print(
-                    ANSI.pad(capacity.name.bold, to: 24) + ANSI.bar(fraction: fraction, width: 30, color: color)
+                let color = capacity.fullness.terminalColor
+                print(
+                    ANSI.pad(Output.safe(capacity.name).bold, to: 24) + ANSI.bar(fraction: fraction, width: 30, color: color)
                         + "  " + "\(ByteCount.format(capacity.available)) available".bold + " of \(ByteCount.format(capacity.total))".dim
                         + "  ·  \(ByteCount.format(capacity.freeNow)) free now".dim
                         + (capacity.purgeable > 0 ? "  ·  \(ByteCount.format(capacity.purgeable)) purgeable".dim : ""))
             }
         }
         if !json, let boot = capacities.first(where: { $0.mountPoint == "/" }), boot.purgeable > 1_000_000_000 {
-            let snapshots = LocalSnapshots.list(volume: "/").count
-            Output.print()
-            Output.print(
+            let snapshots = LocalSnapshots.list().count
+            print()
+            print(
                 ("Available counts purgeable space (as Finder does); macOS releases it automatically when it's needed."
                     + (snapshots > 0
                         ? " \(snapshots) local Time Machine snapshot\(snapshots == 1 ? "" : "s") still reference recently deleted files."
@@ -179,16 +174,16 @@ struct DiskCommand: ParsableCommand {
             try Output.json(slices.map { ["category": $0.category.name, "bytes": String($0.size)] })
             return
         }
-        Output.print()
+        print()
         let total = Double(max(tree.capacity?.used ?? tree.root.size, 1))
         for (index, slice) in slices.enumerated() {
-            Output.print(
+            print(
                 "  " + ANSI.pad(slice.category.name, to: 24) + Output.size(slice.size) + "  "
                     + ANSI.bar(fraction: Double(slice.size) / total, width: 28, color: ANSI.branches[index % ANSI.branches.count]))
         }
         if tree.stats.errors > 0 {
-            Output.print()
-            Output.print(
+            print()
+            print(
                 "  \(tree.stats.errors) folders were unreadable; their contents count as Hidden. Run `spacekit doctor`.".fg(ANSI.review))
         }
     }

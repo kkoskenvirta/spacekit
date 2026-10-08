@@ -24,8 +24,6 @@ public struct ScanOptions: Sendable {
     public var markers: MarkerRegistry = MarkerRegistry(names: [])
     /// Directories up to this depth keep a live running total during the scan (for progressive UI).
     public var liveDepth: Int = 2
-    /// Count each multiply-hard-linked file once (pnpm stores, Time Machine, etc.).
-    public var countHardLinksOnce = true
 
     public init() {}
 
@@ -66,10 +64,6 @@ public struct MarkerRegistry: Sendable {
         return b != 0 && mask & b != 0
     }
 
-    public func names(in mask: UInt64) -> [String] {
-        names.enumerated().compactMap { index, name in mask & (UInt64(1) << UInt64(index)) != 0 ? name : nil }
-    }
-
     @inline(__always)
     func lookup(_ pointer: UnsafePointer<UInt8>, length: Int) -> UInt64 {
         guard length < 256 else { return 0 }
@@ -89,6 +83,7 @@ public final class ScanProgress: Sendable {
     let cancelled = Atomic<Bool>(false)
     let currentPath = Mutex<String>("")
     let root = Mutex<DirNode?>(nil)
+    let rootChildren = Mutex<[DirNode]>([])
 
     public init() {}
 
@@ -110,8 +105,13 @@ public final class ScanProgress: Sendable {
         )
     }
 
-    /// The root node of the scan in progress; children appear as they are listed (check `isListed`).
+    /// The root node of the scan in progress. Read its subfolders through `liveChildren`, not `children`.
     public var liveRoot: DirNode? { root.withLock { $0 } }
+
+    /// The scan root's subfolders, available once the root is listed. Safe to read while the scan runs
+    /// (their `name`, `isListed` and `liveSize`), unlike `liveRoot.children`, which the scan's final pass
+    /// sorts in place.
+    public var liveChildren: [DirNode] { rootChildren.withLock { $0 } }
 
     public func cancel() { cancelled.store(true, ordering: .relaxed) }
     public var isCancelled: Bool { cancelled.load(ordering: .relaxed) }
@@ -120,13 +120,10 @@ public final class ScanProgress: Sendable {
 public struct ScanStats: Sendable, Codable {
     public var files: UInt64
     public var directories: UInt64
-    public var bytes: UInt64
+    /// Directories that couldn't be listed plus entries that couldn't be read (usually privacy-protected locations).
     public var errors: UInt64
     public var duration: TimeInterval
-    public var startedAt: Date
     public var cancelled: Bool
-    /// A sample of directories that could not be read (usually privacy-protected locations).
-    public var unreadable: [String]
 }
 
 public enum ScanError: Error, LocalizedError {
@@ -143,22 +140,34 @@ public enum ScanError: Error, LocalizedError {
     }
 }
 
-/// The result of a scan: an immutable directory tree plus statistics.
+/// The result of a scan: a directory tree plus statistics. The tree changes only through the mutation
+/// methods in `TreeMutations.swift` (see `DirNode` for the threading rules).
 public final class ScanTree: @unchecked Sendable {
     public let root: DirNode
     /// The scanned paths. One element for a normal scan, several for a multi-root scan (where `root` is virtual).
     public let roots: [String]
     public let stats: ScanStats
+    /// When the scan began. Anything that changed on disk after this may not be reflected, so cleanup plans built
+    /// from the tree are dated by it.
+    public let started: Date
     public let options: ScanOptions
     /// Capacity of the volume containing the first root.
     public let capacity: VolumeCapacity?
+    /// Every multiply-linked file in the tree, so a mutation that takes away the link holding a file's bytes can
+    /// hand them to a surviving link.
+    var hardLinks: HardLinkTable
 
-    init(root: DirNode, roots: [String], stats: ScanStats, options: ScanOptions, capacity: VolumeCapacity?) {
+    init(
+        root: DirNode, roots: [String], stats: ScanStats, started: Date, options: ScanOptions, capacity: VolumeCapacity?,
+        hardLinks: [HardLinkKey: HardLinkGroup] = [:]
+    ) {
         self.root = root
         self.roots = roots
         self.stats = stats
+        self.started = started
         self.options = options
         self.capacity = capacity
+        self.hardLinks = HardLinkTable(hardLinks)
     }
 
     public var markers: MarkerRegistry { options.markers }
@@ -183,9 +192,23 @@ public final class ScanTree: @unchecked Sendable {
         let rest = anchor.name == "/" ? String(target.dropFirst()) : String(target.dropFirst(anchor.name.count + 1))
         var node = anchor
         for component in rest.split(separator: "/") {
-            guard let next = node.children.first(where: { $0.name == component }) else { return nil }
+            guard let next = node.child(named: String(component)) else { return nil }
             node = next
         }
         return node
+    }
+}
+
+extension ScanTree {
+    /// Bytes of multiply-linked files that also have links outside this tree. Removing the tree doesn't free them.
+    func bytesLinkedOutside() -> UInt64 {
+        var total: UInt64 = 0
+        for group in hardLinks.groups.values {
+            guard let link = group.links.first else { continue }
+            var st = stat()
+            guard lstat(PathUtil.join(link.node.path, link.name), &st) == 0 else { continue }
+            if Int(st.st_nlink) > group.links.count { total &+= group.size }
+        }
+        return total
     }
 }

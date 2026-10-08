@@ -5,11 +5,36 @@ import Foundation
 public struct LaunchAgent: Sendable {
     public static let label = "dev.spacekit.agent"
 
+    /// Runs `launchctl` with these arguments and returns its exit status and output.
+    public typealias Launchctl = @Sendable (_ arguments: [String]) -> (status: Int32, output: String)
+
     public let paths: SpaceKitPaths
+    /// Where the plist goes, normally `~/Library/LaunchAgents`.
+    public let directory: String
+    let launchctl: Launchctl
+    let pause: @Sendable (TimeInterval) -> Void
 
-    public init(paths: SpaceKitPaths) { self.paths = paths }
+    public init(paths: SpaceKitPaths, directory: String = PathUtil.home + "/Library/LaunchAgents") {
+        self.init(
+            paths: paths, directory: directory,
+            launchctl: { arguments in
+                let result = Shell.run("/bin/launchctl", arguments, timeout: 10)
+                return (result.status, result.output)
+            },
+            pause: { Thread.sleep(forTimeInterval: $0) })
+    }
 
-    public var plistPath: String { PathUtil.home + "/Library/LaunchAgents/\(LaunchAgent.label).plist" }
+    init(paths: SpaceKitPaths, directory: String, launchctl: @escaping Launchctl, pause: @escaping @Sendable (TimeInterval) -> Void) {
+        self.paths = paths
+        self.directory = directory
+        self.launchctl = launchctl
+        self.pause = pause
+    }
+
+    public var plistPath: String { directory + "/\(LaunchAgent.label).plist" }
+
+    private var domain: String { "gui/\(getuid())" }
+    private var service: String { "\(domain)/\(LaunchAgent.label)" }
 
     public struct Status: Sendable {
         public var installed: Bool
@@ -21,18 +46,22 @@ public struct LaunchAgent: Sendable {
     public func status() -> Status {
         let plist = NSDictionary(contentsOfFile: plistPath)
         let arguments = plist?["ProgramArguments"] as? [String]
-        let result = Shell.run("/bin/launchctl", ["print", "gui/\(getuid())/\(LaunchAgent.label)"], timeout: 10)
         return Status(
-            installed: plist != nil, loaded: result.status == 0, executable: arguments?.first,
+            installed: plist != nil, loaded: launchctl(["print", service]).status == 0, executable: arguments?.first,
             interval: plist?["StartInterval"] as? Int)
     }
 
+    /// The interval in seconds launchd is given for a requested `seconds`: within `AutomationSettings.checkEveryRange`.
+    public static func clampedInterval(_ seconds: TimeInterval) -> Int {
+        let range = AutomationSettings.checkEveryRange
+        guard !seconds.isNaN else { return Int(range.lowerBound) }
+        return Int(min(max(seconds, range.lowerBound), range.upperBound))
+    }
+
+    /// The agent runs with the config and state this installer used, so `--config` and `SPACEKIT_STATE_DIR`
+    /// carry over into launchd's environment.
     public func plist(executable: String, interval: Int) -> [String: Any] {
-        var environment = ["SPACEKIT_AGENT": "1"]
-        let env = ProcessInfo.processInfo.environment
-        if let config = env["SPACEKIT_CONFIG"] { environment["SPACEKIT_CONFIG"] = config }
-        if let state = env["SPACEKIT_STATE_DIR"] { environment["SPACEKIT_STATE_DIR"] = state }
-        return [
+        [
             "Label": LaunchAgent.label,
             "ProgramArguments": [executable, "agent", "run"],
             "StartInterval": interval,
@@ -42,33 +71,46 @@ public struct LaunchAgent: Sendable {
             "Nice": 10,
             "StandardOutPath": paths.logDirectory + "/agent.log",
             "StandardErrorPath": paths.logDirectory + "/agent.log",
-            "EnvironmentVariables": environment,
+            "EnvironmentVariables": ["SPACEKIT_CONFIG": paths.configFile, "SPACEKIT_STATE_DIR": paths.stateDirectory],
         ]
     }
 
-    /// Writes the plist and (re)loads it.
-    public func install(executable: String, interval: TimeInterval) throws {
+    /// Writes the plist and (re)loads it. Returns the interval launchd was given, which may differ from
+    /// `interval` (see `clampedInterval`).
+    @discardableResult
+    public func install(executable: String, interval: TimeInterval) throws -> Int {
+        let seconds = LaunchAgent.clampedInterval(interval)
         try paths.ensureDirectories()
-        try FileManager.default.createDirectory(atPath: PathUtil.parent(plistPath), withIntermediateDirectories: true)
         let data = try PropertyListSerialization.data(
-            fromPropertyList: plist(executable: executable, interval: max(300, Int(interval))), format: .xml, options: 0)
-        _ = Shell.run("/bin/launchctl", ["bootout", "gui/\(getuid())/\(LaunchAgent.label)"], timeout: 10)
-        try data.write(to: URL(fileURLWithPath: plistPath), options: .atomic)
-        let result = Shell.run("/bin/launchctl", ["bootstrap", "gui/\(getuid())", plistPath], timeout: 10)
+            fromPropertyList: plist(executable: executable, interval: seconds), format: .xml, options: 0)
+        unload()
+        // 0644 in a 0755 folder whatever the umask: launchd won't load a plist other users can write.
+        try LockedFile.write(data, to: plistPath)
+        var result = launchctl(["bootstrap", domain, plistPath])
+        // launchd can report EIO while it is still tearing down the previous instance.
+        for _ in 0..<3 where result.status != 0 {
+            pause(0.5)
+            result = launchctl(["bootstrap", domain, plistPath])
+        }
         if result.status != 0 {
             throw CocoaError(.executableLoad, userInfo: [NSLocalizedDescriptionKey: "launchctl bootstrap failed: \(result.output)"])
         }
+        return seconds
     }
 
     public func uninstall() throws {
-        _ = Shell.run("/bin/launchctl", ["bootout", "gui/\(getuid())/\(LaunchAgent.label)"], timeout: 10)
+        unload()
         if FileManager.default.fileExists(atPath: plistPath) {
             try FileManager.default.removeItem(atPath: plistPath)
         }
     }
 
-    /// Asks launchd to run the agent now.
-    public func kickstart() {
-        _ = Shell.run("/bin/launchctl", ["kickstart", "gui/\(getuid())/\(LaunchAgent.label)"], timeout: 10)
+    /// Boots the agent out and waits, up to five seconds, until launchd no longer lists it.
+    private func unload() {
+        _ = launchctl(["bootout", service])
+        for _ in 0..<50 {
+            if launchctl(["print", service]).status != 0 { return }
+            pause(0.1)
+        }
     }
 }

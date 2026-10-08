@@ -11,7 +11,6 @@ public struct ByteCount: Hashable, Comparable, Sendable, Codable, CustomStringCo
     public init(integerLiteral value: UInt64) { self.bytes = value }
 
     public static let zero = ByteCount(0)
-    public static func kb(_ n: Double) -> ByteCount { ByteCount(UInt64(n * 1e3)) }
     public static func mb(_ n: Double) -> ByteCount { ByteCount(UInt64(n * 1e6)) }
     public static func gb(_ n: Double) -> ByteCount { ByteCount(UInt64(n * 1e9)) }
     public static func tb(_ n: Double) -> ByteCount { ByteCount(UInt64(n * 1e12)) }
@@ -36,7 +35,10 @@ public struct ByteCount: Hashable, Comparable, Sendable, Codable, CustomStringCo
         for (suffix, multiplier) in units where s.hasSuffix(suffix) {
             let number = s.dropLast(suffix.count).trimmingCharacters(in: .whitespaces)
             guard let value = Double(number), value >= 0, value.isFinite else { return nil }
-            return ByteCount(UInt64((value * multiplier).rounded()))
+            let bytes = (value * multiplier).rounded()
+            // 2^64 is exactly representable; anything at or above it would trap converting to UInt64.
+            guard bytes < 18_446_744_073_709_551_616.0 else { return nil }
+            return ByteCount(UInt64(bytes))
         }
         guard let value = UInt64(s) else { return nil }
         return ByteCount(value)

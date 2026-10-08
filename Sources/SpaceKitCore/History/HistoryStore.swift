@@ -41,17 +41,11 @@ public struct HistoryStore: Sendable {
     public init(file: String) { self.file = file }
 
     public func records(since: Date? = nil) -> [HistoryRecord] {
-        let decoder = JSONDecoder.spaceKit
-        return LockedFile.readLines(file).compactMap { line in
-            guard let record = try? decoder.decode(HistoryRecord.self, from: Data(line.utf8)) else { return nil }
-            if let since, record.date < since { return nil }
-            return record
-        }
-        .sorted { $0.date < $1.date }
+        JSONLines.read(file, since: since, date: \HistoryRecord.date).sorted { $0.date < $1.date }
     }
 
     public func append(_ record: HistoryRecord) throws {
-        try LockedFile.append(String(decoding: try JSONEncoder.spaceKit.encode(record), as: UTF8.self) + "\n", to: file)
+        try JSONLines.append([record], to: file)
     }
 
     public func recordVolumeSample(_ capacity: VolumeCapacity, now: Date = Date()) throws {
@@ -66,8 +60,10 @@ public struct HistoryStore: Sendable {
                 available: capacity.available, purgeable: capacity.purgeable))
     }
 
-    /// Records a full breakdown from an analysis.
+    /// Records a full breakdown from an analysis. A stopped analysis is missing whatever its scan didn't reach,
+    /// so it isn't recorded.
     public func recordSnapshot(analysis: Analysis, now: Date = Date()) throws {
+        guard !analysis.tree.stats.cancelled else { return }
         let capacity = analysis.tree.capacity ?? VolumeCapacity.of(path: "/")
         var groups: [String: UInt64] = [:]
         for group in analysis.groups { groups[group.name] = group.size }
@@ -85,15 +81,15 @@ public struct HistoryStore: Sendable {
     }
 
     /// Change in used space over a window.
-    public func usedDelta(over window: TimeInterval, now: Date = Date()) -> Int64? {
-        let recent = records(since: now.addingTimeInterval(-window))
+    public func usedDelta(over window: Age, now: Date = Date()) -> Int64? {
+        let recent = records(since: window.ago(from: now))
         guard let first = recent.first, let last = recent.last, first.date != last.date else { return nil }
         return Int64(bitPattern: last.used) - Int64(bitPattern: first.used)
     }
 
     /// Which rule groups grew the most between the oldest and newest snapshot in the window.
-    public func whatGrew(over window: TimeInterval, now: Date = Date(), limit: Int = 8) -> [GrowthItem] {
-        let snapshots = records(since: now.addingTimeInterval(-window)).filter { $0.kind == .snapshot }
+    public func whatGrew(over window: Age, now: Date = Date(), limit: Int = 8) -> [GrowthItem] {
+        let snapshots = records(since: window.ago(from: now)).filter { $0.kind == .snapshot }
         guard let first = snapshots.first, let last = snapshots.last, first.date != last.date else { return [] }
         let before = first.groups ?? [:]
         let after = last.groups ?? [:]
@@ -111,7 +107,7 @@ public struct HistoryStore: Sendable {
 
     /// One used-space value per day (the last sample of each day), for charts.
     public func dailyUsage(days: Int, now: Date = Date(), calendar: Calendar = .current) -> [(date: Date, used: UInt64, total: UInt64)] {
-        let since = now.addingTimeInterval(-Double(days) * 86_400)
+        let since = Age.days(Double(days)).ago(from: now)
         var byDay: [Date: HistoryRecord] = [:]
         for record in records(since: since) {
             byDay[calendar.startOfDay(for: record.date)] = record

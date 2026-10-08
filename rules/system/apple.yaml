@@ -80,9 +80,7 @@ rules:
     category: system.trash
     path: ~/.Trash
     granularity: children
-    safety:
-      level: review
-      trash: false
+    safety: review
     policy:
       type: age
       olderThan: 30d

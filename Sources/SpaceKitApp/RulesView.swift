@@ -20,15 +20,16 @@ struct RulesView: View {
     var body: some View {
         HSplitView {
             List(selection: $selectedID) {
-                ForEach(groups, id: \.self) { group in
+                let grouped = Dictionary(grouping: rules, by: \.group)
+                ForEach(grouped.keys.sorted(), id: \.self) { group in
                     Section(group) {
-                        ForEach(rules.filter { $0.group == group }) { rule in
+                        ForEach(grouped[group] ?? []) { rule in
                             HStack {
                                 Image(systemName: Theme.symbol(for: rule.safety.level)).foregroundStyle(Theme.color(for: rule.safety.level))
                                 Text(rule.name)
                                 Spacer()
                                 if let finding = model.analysis?.finding(ruleID: rule.id) {
-                                    Text(finding.size.bytesText).font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                                    Text(finding.size.formattedBytes).font(.caption).monospacedDigit().foregroundStyle(.secondary)
                                 }
                             }
                             .tag(rule.id)
@@ -54,18 +55,12 @@ struct RulesView: View {
                 Button("Reload", systemImage: "arrow.clockwise") { model.reloadContext() }
                     .help("Re-read rule files and the config from disk")
                 Button("Open Rules Folder", systemImage: "folder") {
-                    let directory = model.context.paths.userRulesDirectory
-                    try? FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
-                    model.reveal(directory)
+                    try? model.paths.ensureUserRulesDirectory()
+                    model.reveal(model.paths.userRulesDirectory)
                 }
                 Button("New Rule…", systemImage: "plus") { newRule() }
             }
         }
-    }
-
-    private var groups: [String] {
-        var seen = Set<String>()
-        return rules.compactMap { seen.insert($0.group).inserted ? $0.group : nil }
     }
 
     private var libraryOverview: some View {
@@ -77,7 +72,7 @@ struct RulesView: View {
                         "\(model.library.rules.count) rules describe where tools keep data, how risky it is to remove, and how to clean it."
                 )
                 Text(
-                    "Rules are plain YAML. Add your own in `~/.config/spacekit/rules/`, or contribute to the built-in library in the project's `rules/` folder. A rule with the same id as a built-in one replaces it."
+                    "Rules are plain YAML. Add your own in `~/.config/spacekit/rules/`, or contribute to the built-in library in the project's `rules/` folder. A rule with the same id as a built-in one replaces it, unless the built-in rule is “Don't touch” or the replacement would lower its safety level."
                 )
                 .foregroundStyle(.secondary)
                 HStack(spacing: 12) {
@@ -102,31 +97,17 @@ struct RulesView: View {
     }
 
     private func newRule() {
-        let directory = model.context.paths.userRulesDirectory
-        try? FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+        let directory = model.paths.userRulesDirectory
+        try? model.paths.ensureUserRulesDirectory()
         var path = directory + "/my-rule.yaml"
         var index = 2
         while FileManager.default.fileExists(atPath: path) {
             path = directory + "/my-rule-\(index).yaml"
             index += 1
         }
-        let template = """
-            # Schema: docs/RULES.md — save, then click Reload in SpaceKit.
-            id: custom.my-cache
-            name: My tool's cache
-            group: Custom
-            category: developer.cache
-            description: What this is, and what happens if it's removed.
-            path: ~/Library/Caches/com.example.tool
-            granularity: whole        # or children: each entry inside is an item
-            recreatedBy: My tool
-            safety:
-              level: safe             # safe | review | protected
-              trash: true
-            action: remove
-
-            """
-        try? template.write(toFile: path, atomically: true, encoding: .utf8)
+        let rule = RuleScaffold.rule(name: "My tool's cache", paths: ["~/Library/Caches/com.example.tool"])
+        guard let template = try? RuleScaffold.yaml(rule, note: "save, then click Reload in SpaceKit") else { return }
+        try? SpaceKitPaths.writeRuleFile(template, to: path)
         NSWorkspace.shared.open(URL(fileURLWithPath: path))
     }
 }

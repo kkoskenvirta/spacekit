@@ -3,8 +3,8 @@
 #
 # No cleanup action on purpose: the rule's item is the whole models folder, so an itemCommand
 # would run `ollama rm models`. The AI view sizes each model from its manifests and removes
-# models one at a time with `ollama rm <model>`. ~/.ollama/id_ed25519 is protected in
-# protected/credentials.yaml.
+# models one at a time with ai.removeCommand, because blobs are shared between models and only
+# Ollama knows which ones may go. ~/.ollama/id_ed25519 is protected in protected/credentials.yaml.
 group: Ollama
 category: ai.models
 
@@ -18,3 +18,4 @@ rules:
     ai:
       tool: Ollama
       layout: ollama
+      removeCommand: [ollama, rm, "{name}"]

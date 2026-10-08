@@ -50,6 +50,15 @@ public struct Job: Codable, Sendable, Identifiable, Hashable {
             self.keepRecent = keepRecent
         }
 
+        enum CodingKeys: String, CodingKey { case sizeAbove, olderThan, keepRecent }
+
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            sizeAbove = try c.decodeIfPresent(ByteCount.self, forKey: .sizeAbove)
+            olderThan = try c.decodeRetentionIfPresent(forKey: .olderThan)
+            keepRecent = try c.decodeRetentionIfPresent(forKey: .keepRecent)
+        }
+
         public var isEmpty: Bool { sizeAbove == nil && olderThan == nil && keepRecent == nil }
     }
 
@@ -130,15 +139,17 @@ public struct Job: Codable, Sendable, Identifiable, Hashable {
         return parts.isEmpty ? "Cleans everything matched, on schedule" : parts.joined(separator: " · ")
     }
 
+    /// How long a project counts as active for a rule's `active_projects` exclusion when its policy sets no `keepRecent`.
+    public static let defaultActiveProjectsWindow = Age.days(14)
+
     /// A job pre-filled from a rule's suggested policy.
     public static func suggested(for rule: Rule) -> Job {
         let policy = rule.policy
-        let schedule = policy?.schedule.flatMap(Schedule.parse) ?? .weekly
-        let mode = policy?.mode.flatMap(Mode.init(rawValue:)) ?? (rule.safety.level == .safe ? .automatic : .suggest)
+        let mode = policy?.mode ?? (rule.safety.level == .safe ? .automatic : .suggest)
         var keep = policy?.keepRecent
-        if keep == nil && rule.exclusions.contains(where: RuleEngine.isActiveProjectsToken) { keep = .days(14) }
+        if keep == nil && rule.exclusions.contains(where: RuleEngine.isActiveProjectsToken) { keep = Job.defaultActiveProjectsWindow }
         return Job(
-            id: rule.id, name: rule.name, rules: [rule.id], mode: mode, schedule: schedule,
+            id: rule.id, name: rule.name, rules: [rule.id], mode: mode, schedule: policy?.schedule ?? .weekly,
             when: Conditions(sizeAbove: policy?.threshold, olderThan: policy?.olderThan, keepRecent: keep),
             action: .trash, includeReview: false)
     }
@@ -170,36 +181,47 @@ public struct Schedule: Codable, Sendable, Hashable, CustomStringConvertible {
         self.day = day
     }
 
-    public static let daily = Schedule(every: .daily)
     public static let weekly = Schedule(every: .weekly, weekday: .sunday)
-    public static let monthly = Schedule(every: .monthly, day: 1)
+    /// When the background agent takes a full storage snapshot unless the config says otherwise.
+    public static let defaultSnapshot = Schedule(every: .weekly, at: "04:00", weekday: .sunday)
+    /// Days every month has, so a monthly job never skips a month.
+    public static let monthDays = 1...28
 
+    private static let frequencyWords: [String: Frequency] = [
+        "hourly": .hourly, "hour": .hourly, "daily": .daily, "day": .daily, "nightly": .daily,
+        "weekly": .weekly, "week": .weekly, "monthly": .monthly, "month": .monthly,
+    ]
+
+    /// Parses `weekly`, `daily at 02:30`, `every sunday 04:00`. Every word must be understood: one frequency
+    /// and/or one weekday, at most one `HH:mm` time, and the fillers `at`, `on`, `every`. Anything else is `nil`.
     public static func parse(_ text: String) -> Schedule? {
-        let words = text.lowercased().split(whereSeparator: { $0 == " " || $0 == "," }).map(String.init).filter {
-            $0 != "at" && $0 != "on" && $0 != "every"
-        }
-        var schedule: Schedule?
-        var time = "03:00"
+        let fillers: Set<String> = ["at", "on", "every"]
+        let separated: [Substring] = text.lowercased().split(whereSeparator: { $0 == " " || $0 == "," })
+        let words: [String] = separated.map(String.init).filter { !fillers.contains($0) }
+        var frequency: Frequency?
         var weekday: Weekday?
+        var time: (hour: Int, minute: Int)?
         for word in words {
-            switch word {
-            case "hourly", "hour": schedule = Schedule(every: .hourly)
-            case "daily", "day", "nightly": schedule = Schedule(every: .daily)
-            case "weekly", "week": schedule = Schedule(every: .weekly)
-            case "monthly", "month": schedule = Schedule(every: .monthly, day: 1)
-            default:
-                if let day = Weekday.allCases.first(where: { $0.rawValue == word || $0.rawValue.prefix(3) == word }) {
-                    weekday = day
-                    if schedule == nil { schedule = Schedule(every: .weekly) }
-                } else if word.contains(":"), Schedule.components(word) != nil {
-                    time = word
-                }
+            if let value = frequencyWords[word] {
+                guard frequency == nil else { return nil }
+                frequency = value
+            } else if let day = Weekday.allCases.first(where: { $0.rawValue == word || $0.rawValue.prefix(3) == word }) {
+                guard weekday == nil else { return nil }
+                weekday = day
+            } else if let parsed = components(word) {
+                guard time == nil else { return nil }
+                time = parsed
+            } else {
+                return nil
             }
         }
-        guard var result = schedule else { return nil }
-        result.at = time
-        if result.every == .weekly { result.weekday = weekday ?? .sunday }
-        return result
+        if weekday != nil {
+            guard frequency == nil || frequency == .weekly else { return nil }
+            frequency = .weekly
+        }
+        guard let every = frequency else { return nil }
+        let at = time.map { String(format: "%02d:%02d", $0.hour, $0.minute) } ?? "03:00"
+        return Schedule(every: every, at: at, weekday: every == .weekly ? weekday ?? .sunday : nil, day: every == .monthly ? 1 : nil)
     }
 
     enum CodingKeys: String, CodingKey { case every, at, weekday, day }
@@ -228,11 +250,20 @@ public struct Schedule: Codable, Sendable, Hashable, CustomStringConvertible {
                     codingPath: decoder.codingPath + [CodingKeys.at],
                     debugDescription: "Time '\(at)' must be HH:mm"))
         }
+        if let day, !Schedule.monthDays.contains(day) {
+            throw DecodingError.dataCorrupted(
+                .init(
+                    codingPath: decoder.codingPath + [CodingKeys.day],
+                    debugDescription: "Day \(day) must be 1 to 28, so the job runs every month"))
+        }
     }
 
-    static func components(_ time: String) -> (hour: Int, minute: Int)? {
-        let parts = time.split(separator: ":")
-        guard parts.count == 2, let hour = Int(parts[0]), let minute = Int(parts[1]), (0..<24).contains(hour), (0..<60).contains(minute)
+    /// Hour and minute of an `HH:mm` time (`7:05` and `07:05` both work), or `nil` if it isn't one.
+    public static func components(_ time: String) -> (hour: Int, minute: Int)? {
+        let parts = time.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 2, (1...2).contains(parts[0].count), parts[1].count == 2,
+            parts.allSatisfy({ $0.allSatisfy { ("0"..."9").contains($0) } }),
+            let hour = Int(parts[0]), let minute = Int(parts[1]), (0..<24).contains(hour), (0..<60).contains(minute)
         else { return nil }
         return (hour, minute)
     }
@@ -252,11 +283,11 @@ public struct Schedule: Codable, Sendable, Hashable, CustomStringConvertible {
             match.hour = hour
             match.minute = minute
         case .monthly:
-            match.day = min(max(day ?? 1, 1), 28)
+            match.day = min(max(day ?? 1, Schedule.monthDays.lowerBound), Schedule.monthDays.upperBound)
             match.hour = hour
             match.minute = minute
         }
-        return calendar.nextDate(after: date, matching: match, matchingPolicy: .nextTime) ?? date.addingTimeInterval(86_400)
+        return calendar.nextDate(after: date, matching: match, matchingPolicy: .nextTime) ?? date.addingTimeInterval(Age.days(1).seconds)
     }
 
     /// "Sunday · 03:00", "Every day · 03:00".

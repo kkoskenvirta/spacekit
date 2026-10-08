@@ -11,15 +11,39 @@ struct JobsCommand: ParsableCommand {
         defaultSubcommand: List.self
     )
 
-    static func save(_ context: SpaceKitContext, _ config: SpaceKitConfig) throws {
-        try context.configStore.save(config)
+    static func find(_ id: String, in context: SpaceKitContext) throws -> Job {
+        guard let job = context.config.jobs.first(where: { $0.id == id }) else { throw noJob(id) }
+        return job
     }
 
-    static func find(_ id: String, in context: SpaceKitContext) throws -> Job {
-        guard let job = context.config.jobs.first(where: { $0.id == id }) else {
-            throw ValidationError("No job '\(id)'. See `spacekit jobs list`.")
+    static func noJob(_ id: String) -> ValidationError { ValidationError("No job '\(Output.safe(id))'. See `spacekit jobs list`.") }
+
+    /// Changes the config file as it is on disk now. A file that doesn't parse is never replaced: saving the
+    /// defaults loaded in its place would drop protected paths, allowed commands and disabled rules.
+    static func updateConfig(_ context: SpaceKitContext, _ change: (inout SpaceKitConfig) throws -> Void) throws {
+        if let error = context.configError {
+            Output.warn("The config file is invalid, so nothing was saved. Fix it first (spacekit config validate): \(Output.safe(error))")
+            throw ExitCode.failure
         }
-        return job
+        try context.configStore.update(change)
+    }
+
+    /// The job, what it matched now and whether it would run.
+    static func summaryLines(_ job: Job, _ evaluation: JobEvaluation) -> [String] {
+        [
+            Output.safe(job.name).bold + "  ·  " + job.mode.title + "  ·  " + job.schedule.description,
+            job.conditionSummary.dim,
+            "",
+            "Matched:   " + ByteCount.format(evaluation.matchedBytes).bold,
+            "Eligible:  " + ByteCount.format(evaluation.eligibleBytes).bold + "  (after age conditions)".dim,
+            "Status:    " + (evaluation.isTriggered ? "would run — ".fg(ANSI.safe) : "would skip — ".dim) + evaluation.triggerSummary,
+            "",
+        ]
+    }
+
+    static func warnMissingRules(_ job: Job, runner: JobRunner) {
+        let missing = runner.rules(for: job).missing
+        if !missing.isEmpty { Output.warn("Unknown rules: \(Output.safe(missing.joined(separator: ", ")))") }
     }
 
     struct List: ParsableCommand {
@@ -36,23 +60,21 @@ struct JobsCommand: ParsableCommand {
             let states = context.jobStates.load()
             let next = Dictionary(JobRunner(context: context).nextRuns().map { ($0.job.id, $0.date) }, uniquingKeysWith: { a, _ in a })
             guard !context.config.jobs.isEmpty else {
-                Output.print("No jobs. Add one with `spacekit jobs add --rule xcode.derived-data`, or start from `spacekit config init`.")
+                print("No jobs. Add one with `spacekit jobs add --rule xcode.derived-data`, or start from `spacekit config init`.")
                 return
             }
             for job in context.config.jobs {
-                let toggle = job.enabled ? "ON ●".fg(ANSI.safe) : "OFF ○".dim
-                Output.print(
-                    ANSI.pad(toggle, to: 6) + " " + ANSI.pad(job.name.bold, to: 32) + ANSI.pad(job.mode.title, to: 11)
-                        + ANSI.pad(job.schedule.description, to: 22)
-                        + (job.enabled ? (next[job.id].map { "next " + $0.relativeDescription() } ?? "") : "").dim)
-                Output.print(
-                    "       " + "\(job.id)  ·  ".dim + job.conditionSummary.dim
-                        + (states[job.id]?.lastOutcome.map { "  ·  last: \($0)" } ?? "").dim)
+                print(
+                    ANSI.pad(job.terminalToggle, to: 6) + " " + ANSI.pad(Output.safe(job.name).bold, to: 32) + ANSI.pad(job.mode.title, to: 11)
+                        + ANSI.pad(job.schedule.description, to: 22) + job.nextRunText(next[job.id]).dim)
+                print(
+                    "       " + "\(Output.safe(job.id))  ·  ".dim + job.conditionSummary.dim
+                        + (states[job.id]?.lastOutcome.map { "  ·  last: \(Output.safe($0))" } ?? "").dim)
             }
             let agent = LaunchAgent(paths: context.paths).status()
             if !agent.loaded {
-                Output.print()
-                Output.print(
+                print()
+                print(
                     "The background agent isn't running, so jobs only run when you call them. Install it: ".fg(ANSI.review)
                         + "spacekit agent install".bold)
             }
@@ -60,39 +82,42 @@ struct JobsCommand: ParsableCommand {
     }
 
     struct Show: ParsableCommand {
-        static let configuration = CommandConfiguration(abstract: "Evaluate a job now and show what it would do.")
+        static let configuration = CommandConfiguration(abstract: "Evaluate a job now and show what a scheduled run would do.")
         @OptionGroup var global: GlobalOptions
         @Argument var id: String
+        @Flag(name: .long, help: "Machine-readable output.") var json = false
+
+        struct EvaluationJSON: Encodable {
+            var job: Job
+            var matchedBytes: UInt64
+            var eligibleBytes: UInt64
+            var triggered: Bool
+            var status: String
+            var missingRules: [String]
+            /// Verdicts are those of an automatic run.
+            var plan: PlanJSON
+        }
 
         func run() throws {
             let context = global.loadContext()
             let job = try JobsCommand.find(id, in: context)
             let runner = JobRunner(context: context)
-            let missing = runner.rules(for: job).missing
-            if !missing.isEmpty { Output.warn("Unknown rules: \(missing.joined(separator: ", "))") }
             let evaluation = try ProgressReporter.run("Evaluating") { try runner.evaluate(job, progress: $0) }
-            Output.print(job.name.bold + "  ·  " + job.mode.title + "  ·  " + job.schedule.description)
-            Output.print(job.conditionSummary.dim)
-            Output.print()
-            Output.print("Matched:   " + ByteCount.format(evaluation.matchedBytes).bold)
-            Output.print("Eligible:  " + ByteCount.format(evaluation.eligibleBytes).bold + "  (after age conditions)".dim)
-            Output.print(
-                "Status:    " + (evaluation.isTriggered ? "would run — ".fg(ANSI.safe) : "would skip — ".dim) + evaluation.triggerSummary)
             let plan = runner.plan(for: evaluation)
-            let executor = context.executor
             let automation = CleanupContext.automatic(runner.automationContext(for: job))
-            Output.print()
-            for item in plan.items.sorted(by: { $0.size > $1.size }).prefix(25) {
-                let verdict = executor.verdict(for: item, context: automation)
-                let symbol = verdict.decision == .allow ? "✓".fg(ANSI.safe) : "✗".fg(ANSI.protected)
-                Output.print(
-                    "  \(symbol) " + Output.size(item.size) + "  " + PathUtil.abbreviate(item.path)
-                        + (verdict.decision == .allow ? "" : "  " + (verdict.reasons.first ?? "").fg(ANSI.review)))
+            if json {
+                try Output.json(
+                    EvaluationJSON(
+                        job: job, matchedBytes: evaluation.matchedBytes, eligibleBytes: evaluation.eligibleBytes,
+                        triggered: evaluation.isTriggered, status: evaluation.triggerSummary, missingRules: runner.rules(for: job).missing,
+                        plan: PlanJSON(plan: plan, executor: runner.executor, context: automation)))
+                return
             }
-            if plan.items.count > 25 { Output.print("  … \(plan.items.count - 25) more".dim) }
-            for command in plan.commands { Output.print("  $ ".fg(ANSI.accent) + command.displayString) }
-            Output.print()
-            Output.print("✓ = an automatic run may remove it; ✗ = automatic runs leave it alone (you can still clean it yourself).".dim)
+            JobsCommand.warnMissingRules(job, runner: runner)
+            Output.emit(JobsCommand.summaryLines(job, evaluation))
+            Output.emit(CleanupOutput.planLines(plan, executor: runner.executor, context: automation, limit: 25))
+            print()
+            print("✓ = a scheduled run may remove it; ✗ = scheduled runs leave it alone (you can still clean it yourself).".dim)
         }
     }
 
@@ -111,68 +136,56 @@ struct JobsCommand: ParsableCommand {
         @Option(name: .long, help: "Your own folder to clean (repeatable).") var path: [String] = []
         @Option(name: .long, help: "Job name (default: from the first rule).") var name: String?
         @Option(name: .long, help: "Job id (default: from the name).") var id: String?
-        @Option(name: .long, help: "observe, suggest or automatic.") var mode: String?
-        @Option(name: .long, help: "hourly, daily, weekly, monthly, or e.g. \"sunday 03:00\".") var schedule: String?
-        @Option(name: .long, help: "Only act when the total exceeds this (e.g. 30GB).") var sizeAbove: String?
-        @Option(name: .long, help: "Only items unused at least this long (e.g. 60d).") var olderThan: String?
-        @Option(name: .long, help: "Keep items used within this window (e.g. 14d).") var keepRecent: String?
-        @Option(name: .long, help: "trash, delete or rule.") var action: String = "trash"
+        @Option(name: .long, help: "observe, suggest or automatic.") var mode: Job.Mode?
+        @Option(name: .long, help: "hourly, daily, weekly, monthly, or e.g. \"sunday 03:00\".", transform: Parse.schedule)
+        var schedule: Schedule?
+        @Option(name: .long, help: "Only act when the total exceeds this (e.g. 30GB).", transform: Parse.size) var sizeAbove: ByteCount?
+        @Option(name: .long, help: "Only items unused at least this long (e.g. 60d).", transform: Parse.retention) var olderThan: Age?
+        @Option(name: .long, help: "Keep items used within this window (e.g. 14d).", transform: Parse.retention) var keepRecent: Age?
+        @Option(name: .long, help: "trash, delete or rule.") var action: Job.Action = .trash
         @Flag(name: .long, help: "Allow 🟡 review items in automatic runs.") var includeReview = false
+
+        func validate() throws {
+            guard !rule.isEmpty || !path.isEmpty else { throw ValidationError("Give at least one --rule or --path") }
+        }
 
         func run() throws {
             let context = global.loadContext()
-            guard !rule.isEmpty || !path.isEmpty else { throw ValidationError("Give at least one --rule or --path") }
             var rules: [Rule] = []
             for id in rule {
-                guard let found = context.library.rule(id: id) else { throw ValidationError("Unknown rule '\(id)'") }
-                guard found.safety.level != .protected else { throw ValidationError("\(found.name) is protected and can't be cleaned") }
+                guard let found = context.library.rule(id: id) else { throw ValidationError("Unknown rule '\(Output.safe(id))'") }
+                guard found.safety.level != .protected else {
+                    throw ValidationError("\(Output.safe(found.name)) is protected and can't be cleaned")
+                }
                 rules.append(found)
             }
             var job = rules.first.map(Job.suggested(for:)) ?? Job(id: "custom", name: name ?? "Custom cleanup")
             job.rules = rules.map(\.id)
-            job.paths = path.map { PathUtil.abbreviate(PathUtil.expand($0)) }
+            job.paths = path.map { PathUtil.abbreviate(PathUtil.expandArgument($0)) }
             if let name { job.name = name } else if rules.count > 1 { job.name = rules.map(\.name).joined(separator: " + ") }
             job.id = id ?? Rule.slug(job.name)
-            if let mode {
-                guard let value = Job.Mode(rawValue: mode) else { throw ValidationError("--mode must be observe, suggest or automatic") }
-                job.mode = value
-            } else if !path.isEmpty {
-                job.mode = .suggest
-            }
-            if let schedule {
-                guard let value = Schedule.parse(schedule) else { throw ValidationError("Couldn't understand schedule '\(schedule)'") }
-                job.schedule = value
-            }
-            if let sizeAbove { job.when.sizeAbove = try parseSize(sizeAbove) }
-            if let olderThan { job.when.olderThan = try parseAge(olderThan) }
-            if let keepRecent { job.when.keepRecent = try parseAge(keepRecent) }
-            guard let actionValue = Job.Action(rawValue: action) else { throw ValidationError("--action must be trash, delete or rule") }
-            job.action = actionValue
+            if let mode { job.mode = mode } else if !path.isEmpty { job.mode = .suggest }
+            if let schedule { job.schedule = schedule }
+            if let sizeAbove { job.when.sizeAbove = sizeAbove }
+            if let olderThan { job.when.olderThan = olderThan }
+            if let keepRecent { job.when.keepRecent = keepRecent }
+            job.action = action
             job.includeReview = includeReview
 
             // Check custom folders against the guard up front.
-            let guardian = context.safetyGuard
+            let automation = CleanupContext.automatic(JobRunner(context: context).automationContext(for: job))
             for folder in job.paths {
-                let verdict = guardian.evaluate(
-                    path: PathUtil.join(PathUtil.expand(folder), "item"),
-                    context: .automatic(JobRunner(context: context).automationContext(for: job)))
+                let verdict = context.safetyGuard.evaluate(path: PathUtil.join(PathUtil.expand(folder), "item"), context: automation)
                 if verdict.isBlocked {
-                    Output.warn("Automatic runs won't clean inside \(folder): \(verdict.reasons.joined(separator: "; "))")
+                    Output.warn(Output.safe("Automatic runs won't clean inside \(folder): \(verdict.reasons.joined(separator: "; "))"))
                 }
             }
-            var config = context.config
-            var base = job.id
-            var counter = 2
-            while config.jobs.contains(where: { $0.id == job.id }) {
-                job.id = "\(base)-\(counter)"
-                counter += 1
-            }
-            base = job.id
-            config.jobs.append(job)
-            try JobsCommand.save(context, config)
-            Output.print("Added job " + job.id.bold + ": \(job.mode.title), \(job.schedule). " + job.conditionSummary.dim)
+            var storedID = job.id
+            try JobsCommand.updateConfig(context) { storedID = $0.upsertJob(job, replacing: nil) }
+            job.id = storedID
+            print("Added job " + Output.safe(job.id).bold + ": \(job.mode.title), \(job.schedule). " + job.conditionSummary.dim)
             if job.mode == .automatic && !LaunchAgent(paths: context.paths).status().loaded {
-                Output.print("Install the background agent so it runs on schedule: ".fg(ANSI.review) + "spacekit agent install".bold)
+                print("Install the background agent so it runs on schedule: ".fg(ANSI.review) + "spacekit agent install".bold)
             }
         }
     }
@@ -184,11 +197,11 @@ struct JobsCommand: ParsableCommand {
 
         func run() throws {
             let context = global.loadContext()
-            _ = try JobsCommand.find(id, in: context)
-            var config = context.config
-            config.jobs.removeAll { $0.id == id }
-            try JobsCommand.save(context, config)
-            Output.print("Removed \(id).")
+            try JobsCommand.updateConfig(context) { config in
+                guard config.jobs.contains(where: { $0.id == id }) else { throw JobsCommand.noJob(id) }
+                config.jobs.removeAll { $0.id == id }
+            }
+            print("Removed \(Output.safe(id)).")
         }
     }
 
@@ -208,20 +221,36 @@ struct JobsCommand: ParsableCommand {
 
     static func setEnabled(_ id: String, _ enabled: Bool, _ global: GlobalOptions) throws {
         let context = global.loadContext()
-        _ = try find(id, in: context)
-        var config = context.config
-        for index in config.jobs.indices where config.jobs[index].id == id { config.jobs[index].enabled = enabled }
-        try save(context, config)
-        Output.print("\(id): \(enabled ? "on" : "off")")
+        try updateConfig(context) { config in
+            guard let index = config.jobs.firstIndex(where: { $0.id == id }) else { throw noJob(id) }
+            config.jobs[index].enabled = enabled
+        }
+        print("\(Output.safe(id)): \(enabled ? "on" : "off")")
+    }
+
+    /// Saves a run's outcome so the job's schedule moves on; a failure to save is reported, not swallowed.
+    static func record(_ result: JobRunResult, runner: JobRunner) -> Bool {
+        do {
+            try runner.record(result)
+            return true
+        } catch {
+            Output.warn(Output.safe("Couldn't save the job's state: \(error.localizedDescription)"))
+            return false
+        }
     }
 
     struct Run: ParsableCommand {
         static let configuration = CommandConfiguration(
-            abstract: "Run a job now. Previews by default; --yes cleans; --scheduled behaves exactly like the agent would."
+            abstract: "Run a job now. Previews by default; --yes cleans; --scheduled behaves exactly like the agent would.",
+            discussion: """
+                Without --scheduled the job cleans now, whatever its mode, with the checks of a cleanup you start yourself:
+                the preview lists what will go and any warnings, and --yes confirms them. The exit status is nonzero when
+                anything failed or a warning was raised.
+                """
         )
         @OptionGroup var global: GlobalOptions
         @Argument var id: String
-        @Flag(name: [.short, .long], help: "Clean now (as if you approved it).") var yes = false
+        @Flag(name: [.short, .long], help: "Clean now, accepting the warnings in the preview.") var yes = false
         @Flag(name: .long, help: "Follow the job's mode (observe/suggest/automatic) like a scheduled run.") var scheduled = false
 
         func run() throws {
@@ -229,45 +258,85 @@ struct JobsCommand: ParsableCommand {
             let job = try JobsCommand.find(id, in: context)
             let runner = JobRunner(context: context)
             if scheduled {
-                let result = ProgressReporter.run("Running \(job.name)") { _ in runner.run(job) }
-                Output.print(result.summary)
+                try runScheduled(job, runner: runner)
                 return
             }
-            if !yes {
-                try JobsCommand.Show.parse([id] + (global.config.map { ["--config", $0] } ?? [])).run()
-                Output.print()
-                Output.print("Preview only. Run with --yes to clean now, or --scheduled to run it the way the agent would.".dim)
+            JobsCommand.warnMissingRules(job, runner: runner)
+            let evaluation = try ProgressReporter.run("Evaluating \(Output.safe(job.name))") { try runner.evaluate(job, progress: $0) }
+            Output.emit(JobsCommand.summaryLines(job, evaluation))
+            guard evaluation.isTriggered else {
+                if yes && !JobsCommand.record(.manual(evaluation, report: nil), runner: runner) { throw ExitCode(1) }
                 return
             }
-            let result = ProgressReporter.run("Running \(job.name)") { _ in runner.run(job, manual: true) }
-            Output.print(result.summary)
-            if case .cleaned(let report) = result.action {
-                for (item, reason) in report.skipped { Output.print("  skipped ".dim + PathUtil.abbreviate(item.path) + ": " + reason.dim) }
+            guard
+                let report = try CleanupOutput.session(
+                    runner.plan(for: evaluation), executor: runner.executor, yes: yes, json: false, interactive: false,
+                    heading: "What this run removes",
+                    hint: "Preview only. Run with --yes to clean now, or --scheduled to run it the way the agent would.")
+            else { return }
+            let recorded = JobsCommand.record(.manual(evaluation, report: report), runner: runner)
+            try CleanupOutput.exitIfProblems(report)
+            if !recorded { throw ExitCode(1) }
+        }
+
+        private func runScheduled(_ job: Job, runner: JobRunner) throws {
+            let result = ProgressReporter.run("Running \(Output.safe(job.name))") { _ in runner.run(job) }
+            print(Output.safe(result.summary))
+            var failed = result.recordError != nil
+            switch result.action {
+            case .cleaned(let report):
+                Output.emit(Array(CleanupOutput.reportLines(report).dropFirst()))
+                failed = failed || report.hasProblems
+            case .failed:
+                failed = true
+            case .notTriggered, .observed, .suggested:
+                break
             }
+            if let problem = result.recordError { Output.warn(Output.safe(problem)) }
+            if failed { throw ExitCode(1) }
         }
     }
 
     struct Next: ParsableCommand {
         static let configuration = CommandConfiguration(abstract: "When jobs run next, and how much they're expected to free.")
         @OptionGroup var global: GlobalOptions
+        @Flag(name: .long, help: "Machine-readable output.") var json = false
+
+        struct NextJSON: Encodable {
+            struct Run: Encodable {
+                var job: String
+                var name: String
+                var date: Date
+            }
+            var runs: [Run]
+            var estimatedLowBytes: UInt64
+            var estimatedHighBytes: UInt64
+        }
 
         func run() throws {
             let context = global.loadContext()
             let runner = JobRunner(context: context)
             let runs = runner.nextRuns()
-            guard let first = runs.first else {
-                Output.print("No enabled jobs.")
+            let estimate = runner.estimatedRecovery()
+            if json {
+                try Output.json(
+                    NextJSON(
+                        runs: runs.map { NextJSON.Run(job: $0.job.id, name: $0.job.name, date: $0.date) }, estimatedLowBytes: estimate.low,
+                        estimatedHighBytes: estimate.high))
                 return
             }
-            Output.print("Next automatic cleanup".bold)
-            Output.print(first.date.formatted(.dateTime.weekday(.wide).hour().minute()) + "  ·  " + first.job.name)
-            let estimate = runner.estimatedRecovery()
-            if estimate.high > 0 {
-                Output.print("Estimated recovery: \(ByteCount.format(estimate.low))–\(ByteCount.format(estimate.high))".dim)
+            guard let first = runs.first else {
+                print("No enabled jobs.")
+                return
             }
-            Output.print()
+            print("Next automatic cleanup".bold)
+            print(first.date.formatted(.dateTime.weekday(.wide).hour().minute()) + "  ·  " + Output.safe(first.job.name))
+            if estimate.high > 0 {
+                print("Estimated recovery: \(ByteCount.format(estimate.low))–\(ByteCount.format(estimate.high))".dim)
+            }
+            print()
             for run in runs {
-                Output.print("  " + ANSI.pad(run.date.formatted(date: .abbreviated, time: .shortened), to: 22) + run.job.name)
+                print("  " + ANSI.pad(run.date.formatted(date: .abbreviated, time: .shortened), to: 22) + Output.safe(run.job.name))
             }
         }
     }
@@ -281,46 +350,96 @@ struct SuggestionsCommand: ParsableCommand {
         defaultSubcommand: List.self
     )
 
+    static func find(_ id: String, in context: SpaceKitContext) throws -> Suggestion {
+        guard let suggestion = context.suggestions.get(id) else {
+            throw ValidationError("No suggestion '\(Output.safe(id))'. See `spacekit suggestions`.")
+        }
+        return suggestion
+    }
+
     struct List: ParsableCommand {
         static let configuration = CommandConfiguration(abstract: "List pending suggestions.")
         @OptionGroup var global: GlobalOptions
+        @Flag(name: .long, help: "Machine-readable output.") var json = false
 
         func run() throws {
             let context = global.loadContext()
             let suggestions = context.suggestions.all()
+            if json {
+                try Output.json(suggestions)
+                return
+            }
             guard !suggestions.isEmpty else {
-                Output.print("No pending suggestions.")
+                print("No pending suggestions.")
                 return
             }
             for suggestion in suggestions {
-                Output.print(
-                    suggestion.id.bold + "  " + suggestion.jobName + "  " + ByteCount.format(suggestion.plan.totalBytes).bold
-                        + "  " + "prepared \(suggestion.created.relativeDescription())".dim)
+                print(
+                    Output.safe(suggestion.id).bold + "  " + Output.safe(suggestion.jobName) + "  "
+                        + ByteCount.format(suggestion.plan.totalBytes).bold + "  "
+                        + "prepared \(suggestion.created.relativeDescription())".dim)
                 for item in suggestion.plan.items.sorted(by: { $0.size > $1.size }).prefix(5) {
-                    Output.print("    " + Output.size(item.size) + "  " + PathUtil.abbreviate(item.path).dim)
+                    print("    " + Output.size(item.size) + "  " + Output.path(item.path).dim)
                 }
-                if suggestion.plan.items.count > 5 { Output.print("    … \(suggestion.plan.items.count - 5) more".dim) }
+                if suggestion.plan.items.count > 5 { print("    … \(suggestion.plan.items.count - 5) more".dim) }
             }
-            Output.print()
-            Output.print("Approve with `spacekit suggestions approve <id>`, or dismiss with `spacekit suggestions dismiss <id>`.".dim)
+            print()
+            print("Preview one with `spacekit suggestions approve <id>`, or dismiss it with `spacekit suggestions dismiss <id>`.".dim)
         }
     }
 
     struct Approve: ParsableCommand {
-        static let configuration = CommandConfiguration(abstract: "Run a suggested cleanup.")
+        static let configuration = CommandConfiguration(
+            abstract: "Preview a suggested cleanup; run it with --yes.",
+            discussion: """
+                The job is evaluated again first: items used since the suggestion was made, or no longer matching the
+                job's age conditions, are dropped. The suggestion is kept unless the run removed something and nothing
+                failed. The exit status is nonzero when anything failed or a warning was raised.
+                """
+        )
         @OptionGroup var global: GlobalOptions
         @Argument var id: String
+        @Flag(name: [.short, .long], help: "Run the cleanup, accepting the warnings in the preview.") var yes = false
+        @Flag(name: .long, help: "Machine-readable plan and result on stdout; the preview goes to stderr.") var json = false
 
         func run() throws {
             let context = global.loadContext()
-            guard let suggestion = context.suggestions.get(id) else { throw ValidationError("No suggestion '\(id)'") }
-            let report = context.executor.execute(suggestion.plan, context: .manual(confirmed: true), dryRun: false)
-            try context.suggestions.remove(suggestion.id)
-            try? context.jobStates.update(suggestion.jobID) { $0.lastFreedBytes = report.freedBytes }
-            Output.print(report.summary.bold.fg(ANSI.safe))
-            for (item, reason) in report.skipped + report.failures {
-                Output.print("  skipped ".dim + PathUtil.abbreviate(item.path) + ": " + reason.dim)
+            let suggestion = try SuggestionsCommand.find(id, in: context)
+            guard let job = context.config.jobs.first(where: { $0.id == suggestion.jobID }) else {
+                throw ValidationError(
+                    "The job that prepared this suggestion (\(Output.safe(suggestion.jobID))) is no longer in your config, so its conditions can't be "
+                        + "checked. Dismiss it: spacekit suggestions dismiss \(Output.safe(suggestion.id))")
             }
+            let runner = JobRunner(context: context)
+            let evaluation = try ProgressReporter.run("Checking \(Output.safe(job.name))") { try runner.evaluate(job, progress: $0) }
+            let (plan, dropped) = suggestion.plan.keeping(onlyEligible: evaluation.eligible)
+            var notes = [
+                Output.safe(suggestion.jobName).bold + "  ·  " + "prepared \(suggestion.created.relativeDescription())".dim
+            ]
+            notes += dropped.map { "  no longer eligible: ".dim + Output.path($0.path) }
+            Output.emit(notes, toStandardError: json)
+            guard !plan.isEmpty else {
+                let dismiss = "spacekit suggestions dismiss \(Output.safe(suggestion.id))"
+                Output.emit(
+                    ["Nothing in this suggestion still matches the job's conditions. Dismiss it: " + dismiss], toStandardError: json)
+                if json {
+                    try Output.json(RunJSON(plan: PlanJSON(plan: plan, executor: runner.executor, context: .manual(confirmed: false))))
+                }
+                return
+            }
+            guard
+                let report = try CleanupOutput.session(
+                    plan, executor: runner.executor, yes: yes, json: json, interactive: false, heading: "Suggested cleanup",
+                    hint: "Preview only. Approve with: spacekit suggestions approve \(Output.safe(suggestion.id)) --yes")
+            else { return }
+            let recorded = JobsCommand.record(.manual(evaluation, report: report), runner: runner)
+            if report.removedAnything && !report.hasProblems {
+                try context.suggestions.remove(suggestion.id)
+            } else {
+                Output.emit(["Kept the suggestion, so you can try again or dismiss it."], toStandardError: json)
+            }
+            try CleanupOutput.exitIfProblems(report)
+            if !recorded { throw ExitCode(1) }
         }
     }
 
@@ -331,9 +450,9 @@ struct SuggestionsCommand: ParsableCommand {
 
         func run() throws {
             let context = global.loadContext()
-            guard let suggestion = context.suggestions.get(id) else { throw ValidationError("No suggestion '\(id)'") }
+            let suggestion = try SuggestionsCommand.find(id, in: context)
             try context.suggestions.remove(suggestion.id)
-            Output.print("Dismissed.")
+            print("Dismissed.")
         }
     }
 }
@@ -353,34 +472,42 @@ struct AgentCommand: ParsableCommand {
         func run() throws {
             let context = global.loadContext()
             try context.paths.ensureDirectories()
-            let stamp = ISO8601DateFormatter().string(from: Date())
+            let stamp = Date().ISO8601Format()
             print("[\(stamp)] agent run")
-            let results = JobRunner(context: context).runDue { print("[\(stamp)] \($0)") }
+            let results = JobRunner(context: context).runDue { print("[\(stamp)] \(Output.safe($0))") }
             if results.isEmpty { print("[\(stamp)] no jobs due") }
         }
     }
 
     struct Install: ParsableCommand {
-        static let configuration = CommandConfiguration(abstract: "Install and start the background agent.")
+        static let configuration = CommandConfiguration(
+            abstract: "Install and start the background agent.",
+            discussion: "The agent uses the config this command uses (--config or $SPACEKIT_CONFIG) and the same state folder."
+        )
         @OptionGroup var global: GlobalOptions
-        @Option(name: .long, help: "Check interval (default: automation.checkEvery, 1h).") var every: String?
+        @Option(name: .long, help: "Check interval, 5m to 24h (default: automation.checkEvery, 1h).", transform: Parse.age) var every: Age?
 
         func run() throws {
             let context = global.loadContext()
-            let interval = try every.map { try parseAge($0).seconds } ?? context.config.automation.checkEvery.seconds
-            guard let executable = Bundle.main.executablePath.map({ URL(fileURLWithPath: $0).resolvingSymlinksInPath().path }) else {
+            let requested = every ?? context.config.automation.checkEvery
+            guard let executable = LaunchAgent.spacekitExecutable() else {
                 throw ValidationError("Can't locate the spacekit executable")
             }
-            if executable.contains("/.build/") {
-                Output.warn("Installing an agent that points at a development build (\(executable)). Run `make install` for a stable path.")
+            if LaunchAgent.isDevelopmentBuild(executable) {
+                Output.warn(
+                    "Installing an agent that points at a development build (\(Output.safe(executable))). "
+                        + "Run `make install` for a stable path.")
             }
-            let agent = LaunchAgent(paths: context.paths)
-            try agent.install(executable: executable, interval: interval)
-            Output.print("Background agent installed: checks for due jobs every \(Age(seconds: interval)).")
-            Output.print("Logs: \(PathUtil.abbreviate(context.paths.logDirectory + "/agent.log"))".dim)
-            Output.print(
-                "To scan protected folders it needs Full Disk Access: System Settings → Privacy & Security → Full Disk Access → add \(executable)."
-                    .dim)
+            let seconds = try LaunchAgent(paths: context.paths).install(executable: executable, interval: requested.seconds)
+            let interval = Age(seconds: TimeInterval(seconds))
+            print(
+                "Background agent installed: checks for due jobs every \(interval)"
+                    + (interval == requested ? "." : " (\(requested) is outside the allowed 5m to 24h)."))
+            print("Config: \(Output.path(context.paths.configFile))".dim)
+            print("Logs: \(Output.path(context.paths.logDirectory + "/agent.log"))".dim)
+            print(
+                ("To scan protected folders it needs Full Disk Access: System Settings → Privacy & Security → Full Disk Access → add "
+                    + "\(Output.safe(executable)).").dim)
         }
     }
 
@@ -390,23 +517,40 @@ struct AgentCommand: ParsableCommand {
 
         func run() throws {
             try LaunchAgent(paths: global.loadContext().paths).uninstall()
-            Output.print("Background agent removed. Jobs stay in your config.")
+            print("Background agent removed. Jobs stay in your config.")
         }
     }
 
     struct Status: ParsableCommand {
         static let configuration = CommandConfiguration(abstract: "Show whether the agent is installed and running.")
         @OptionGroup var global: GlobalOptions
+        @Flag(name: .long, help: "Machine-readable output.") var json = false
+
+        struct StatusJSON: Encodable {
+            var installed: Bool
+            var loaded: Bool
+            var executable: String?
+            var intervalSeconds: Int?
+            var nextJob: String?
+            var nextRun: Date?
+        }
 
         func run() throws {
             let context = global.loadContext()
             let status = LaunchAgent(paths: context.paths).status()
-            Output.print("Installed: " + (status.installed ? "yes".fg(ANSI.safe) : "no".fg(ANSI.review)))
-            Output.print("Loaded:    " + (status.loaded ? "yes".fg(ANSI.safe) : "no".fg(ANSI.review)))
-            if let executable = status.executable { Output.print("Program:   \(executable)") }
-            if let interval = status.interval { Output.print("Interval:  \(Age(seconds: TimeInterval(interval)))") }
-            let runs = JobRunner(context: context).nextRuns()
-            if let first = runs.first { Output.print("Next job:  \(first.job.name), \(first.date.relativeDescription())") }
+            let next = JobRunner(context: context).nextRuns().first
+            if json {
+                try Output.json(
+                    StatusJSON(
+                        installed: status.installed, loaded: status.loaded, executable: status.executable, intervalSeconds: status.interval,
+                        nextJob: next?.job.id, nextRun: next?.date))
+                return
+            }
+            print("Installed: " + (status.installed ? "yes".fg(ANSI.safe) : "no".fg(ANSI.review)))
+            print("Loaded:    " + (status.loaded ? "yes".fg(ANSI.safe) : "no".fg(ANSI.review)))
+            if let executable = status.executable { print("Program:   \(Output.safe(executable))") }
+            if let interval = status.interval { print("Interval:  \(Age(seconds: TimeInterval(interval)))") }
+            if let next { print("Next job:  \(Output.safe(next.job.name)), \(next.date.relativeDescription())") }
         }
     }
 }

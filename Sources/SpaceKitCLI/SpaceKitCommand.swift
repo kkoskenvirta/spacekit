@@ -35,12 +35,19 @@ struct GlobalOptions: ParsableArguments {
     @Option(name: .long, help: "Config file (default: ~/.config/spacekit/config.yaml or $SPACEKIT_CONFIG).")
     var config: String?
 
-    func loadContext() -> SpaceKitContext {
+    /// Where config and state live. The config path is absolute, so a launch agent installed with it finds it too.
+    var paths: SpaceKitPaths {
         var paths = SpaceKitPaths.standard
-        if let config { paths.configFile = PathUtil.expand(config) }
+        if let config { paths.configFile = PathUtil.expandArgument(config) }
+        return paths
+    }
+
+    func loadContext() -> SpaceKitContext {
         let context = SpaceKitContext.load(paths: paths)
         if let error = context.configError {
-            Output.warn("Config not loaded, using defaults: \(error)")
+            Output.warn(
+                Output.safe("Config not loaded, using defaults: \(error)")
+                    + ". Nothing will be removed until it's fixed (spacekit config validate).")
         }
         return context
     }

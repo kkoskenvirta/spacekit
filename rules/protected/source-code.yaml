@@ -1,8 +1,5 @@
 # Source code. Protected: SpaceKit shows repositories and never removes them.
 # Schema: docs/RULES.md
-#
-# `match.exclude` applies to every pattern rule. These tool homes hold git clones and bundled
-# node_modules that are not your projects, and aren't in SpaceKit's default exclusions yet.
 group: Source code
 category: personal.code
 
@@ -12,7 +9,4 @@ rules:
     description: Git metadata of your repositories, including unpushed commits, branches and stashes. SpaceKit never removes it and asks before removing any folder that is a repository; generated folders inside a project (node_modules, build output) are listed under their own rules.
     match:
       names: [.git]
-      exclude:
-        - ~/.cocoapods
-        - ~/jan
     safety: protected

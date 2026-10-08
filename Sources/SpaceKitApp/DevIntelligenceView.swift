@@ -52,13 +52,13 @@ struct DevIntelligenceView: View {
     private func summary(_ analysis: Analysis) -> some View {
         HStack(spacing: 12) {
             StatTile(
-                title: "Regenerable", value: analysis.total(.safe).bytesText, detail: "Recreated automatically by its tool",
+                title: "Regenerable", value: analysis.total(.safe).formattedBytes, detail: "Recreated automatically by its tool",
                 symbol: Theme.symbol(for: .safe), tint: Theme.good)
             StatTile(
-                title: "Review", value: analysis.total(.review).bytesText, detail: "Removable, but costs a download or rebuild",
+                title: "Review", value: analysis.total(.review).formattedBytes, detail: "Removable, but costs a download or rebuild",
                 symbol: Theme.symbol(for: .review), tint: Theme.warning)
             StatTile(
-                title: "Don't touch", value: analysis.total(.protected).bytesText, detail: "Identified and protected",
+                title: "Don't touch", value: analysis.total(.protected).formattedBytes, detail: "Identified and protected",
                 symbol: Theme.symbol(for: .protected), tint: Theme.critical)
         }
     }
@@ -69,7 +69,7 @@ struct DevIntelligenceView: View {
             Text(model.tree == nil ? "Waiting for a scan…" : "Looking for Xcode, Node, Python, Rust, Docker, AI models and more…")
                 .foregroundStyle(.secondary)
             if let progress = model.analysisProgress?.snapshot, progress.files > 0 {
-                Text("\(progress.bytes.bytesText) · \(progress.files.formatted()) files").monospacedDigit().foregroundStyle(.secondary)
+                Text("\(progress.bytes.formattedBytes) · \(progress.files.formatted()) files").monospacedDigit().foregroundStyle(.secondary)
             }
         }
         .frame(maxWidth: .infinity)
@@ -86,7 +86,7 @@ private struct LevelSection: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Label(level.title, systemImage: Theme.symbol(for: level)).foregroundStyle(Theme.color(for: level)).font(.headline)
-                Text(total.bytesText).font(.headline).monospacedDigit()
+                Text(total.formattedBytes).font(.headline).monospacedDigit()
                 Spacer()
                 Text(explanation).font(.caption).foregroundStyle(.secondary)
             }
@@ -123,27 +123,22 @@ struct FindingCard: View {
                     }
                     Spacer()
                     if model.refreshingRules.contains(rule.id) { ProgressView().controlSize(.small) }
-                    Text(finding.size.bytesText).font(.title2.weight(.semibold)).monospacedDigit()
+                    Text(finding.size.formattedBytes).font(.title2.weight(.semibold)).monospacedDigit()
                         .contentTransition(.numericText())
                 }
                 if let description = rule.description {
                     Text(description).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
                 Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
-                    if finding.isCleanable { fact("Reclaimable", finding.size.bytesText) }
-                    GridRow {
-                        Text("Risk").foregroundStyle(.secondary)
-                        HStack {
-                            Text(rule.safety.level.risk)
-                            SafetyBadge(level: rule.safety.level)
+                    ForEach(finding.facts(), id: \.kind) { fact in
+                        GridRow {
+                            Text(fact.label).foregroundStyle(.secondary)
+                            HStack {
+                                Text(fact.value)
+                                if fact.kind == .risk { SafetyBadge(level: rule.safety.level) }
+                            }
                         }
                     }
-                    if let recreatedBy = rule.recreatedBy { fact("Recreated by", recreatedBy) }
-                    if let used = finding.lastUsed { fact("Last used", used.shortRelative) }
-                    if finding.items.count > 1 || rule.isPattern {
-                        fact(rule.isPattern ? "Projects" : "Items", "\(finding.items.count)")
-                    }
-                    if let manual = rule.action.manual { fact("How to clean", manual) }
                 }
                 .font(.callout)
 
@@ -168,7 +163,7 @@ struct FindingCard: View {
                                 if let days = item.idleDays() {
                                     Text("\(days)d").font(.caption).foregroundStyle(.secondary).monospacedDigit()
                                 }
-                                Text(item.size.bytesText).monospacedDigit().foregroundStyle(.secondary)
+                                Text(item.size.formattedBytes).monospacedDigit().foregroundStyle(.secondary)
                                 Button {
                                     model.reveal(item.path)
                                 } label: {
@@ -192,26 +187,19 @@ struct FindingCard: View {
                             let items = picked.isEmpty ? nil : finding.items.filter { picked.contains($0.id) }
                             model.reviewFinding(finding, items: items)
                         } label: {
-                            Text(picked.isEmpty ? "Clean \(finding.size.bytesText)" : "Clean \(picked.count) selected")
+                            Text(picked.isEmpty ? "Clean \(finding.size.formattedBytes)" : "Clean \(picked.count) selected")
                         }
                         .buttonStyle(.borderedProminent)
                         .tint(rule.safety.level == .safe ? Theme.categorical[0] : Theme.warning)
                         Button("Automate…") { model.jobDraft = JobDraft(rule: rule) }
                             .help("Create a scheduled job for this rule")
                         Spacer()
-                        if let docs = rule.docs, let url = URL(string: docs) {
+                        if let url = rule.docsURL {
                             Link("Docs", destination: url).font(.callout)
                         }
                     }
                 }
             }
-        }
-    }
-
-    private func fact(_ title: String, _ value: String) -> some View {
-        GridRow {
-            Text(title).foregroundStyle(.secondary)
-            Text(value)
         }
     }
 }

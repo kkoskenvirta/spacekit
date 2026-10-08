@@ -7,28 +7,49 @@ public struct Removal: Sendable, Hashable {
     public var bytes: UInt64
     /// Where the item went if it was moved to the Trash.
     public var trashedTo: String?
+    /// For loose files moved to the Trash: where each file went (the full path in the Trash).
+    public var trashedFiles: [String]
+    /// The item's deletion failed part way: `bytes` of it were deleted and the rest is still at `path`.
+    public var partial: Bool
 
-    public init(path: String, kind: FindingItem.Kind, bytes: UInt64, trashedTo: String? = nil) {
+    public init(
+        path: String, kind: FindingItem.Kind, bytes: UInt64, trashedTo: String? = nil, trashedFiles: [String] = [],
+        partial: Bool = false
+    ) {
         self.path = path
         self.kind = kind
         self.bytes = bytes
         self.trashedTo = trashedTo
+        self.trashedFiles = trashedFiles
+        self.partial = partial
     }
 
-    /// Successful removals in a report (including zero-byte ones, so the tree still drops them).
+    /// Removals in a report: successful ones (including zero-byte ones, so the tree still drops them) and
+    /// items that were deleted only in part (see `CleanupReport.partiallyFreed`).
     public static func from(_ report: CleanupReport) -> [Removal] {
-        report.items.compactMap { entry in
-            entry.outcome.isRemoved
-                ? Removal(path: entry.item.path, kind: entry.item.kind, bytes: entry.outcome.freedBytes, trashedTo: entry.outcome.trashedTo)
-                : nil
+        report.items.compactMap { entry -> Removal? in
+            if let freed = report.partiallyFreed[entry.item.path], entry.outcome.isFailed {
+                return Removal(path: entry.item.path, kind: entry.item.kind, bytes: freed, partial: true)
+            }
+            guard entry.outcome.isRemoved else { return nil }
+            let trashedFiles: [String] = entry.item.kind == .looseFiles ? (report.trashedLooseFiles[entry.item.path] ?? []) : []
+            return Removal(
+                path: entry.item.path, kind: entry.item.kind, bytes: entry.outcome.freedBytes, trashedTo: entry.outcome.trashedTo,
+                trashedFiles: trashedFiles)
         }
     }
 
     /// Applies this removal to a tree: trashed items move into the Trash folder (if the tree has it),
-    /// deleted ones disappear. Returns true if the tree changed.
+    /// deleted ones disappear, and a partly deleted folder is rescanned. Returns true if the tree changed.
     @discardableResult
     public func apply(to tree: ScanTree) -> Bool {
-        if kind == .looseFiles { return tree.applyRemoval(of: path, looseFilesOnly: true) > 0 }
+        if partial { return tree.rescan(path) }
+        if kind == .looseFiles {
+            let taken = tree.applyRemoval(of: path, looseFilesOnly: true)
+            var placed = false
+            for file in trashedFiles where tree.applyArrival(of: file) { placed = true }
+            return taken > 0 || placed
+        }
         let before = tree.root.size
         let existed = tree.node(at: path) != nil || tree.node(at: PathUtil.parent(path)) != nil
         if let trashedTo {
@@ -41,7 +62,20 @@ public struct Removal: Sendable, Hashable {
 
     /// True if this removal took away everything at `path` (the item itself or a folder containing it).
     func covers(_ path: String) -> Bool {
-        kind != .looseFiles && PathUtil.isAncestorOrEqual(self.path, of: path)
+        !partial && kind != .looseFiles && PathUtil.isAncestorOrEqual(self.path, of: path)
+    }
+
+    /// True if this removal took part of `item` (but not all of it). A loose-files item only holds the plain
+    /// files directly in its folder, so only a removed file in that folder takes part of it.
+    func isInside(_ item: FindingItem) -> Bool {
+        if partial && item.path == path { return true }
+        switch (item.kind, kind) {
+        case (.file, _): return false
+        case (.looseFiles, .file): return PathUtil.parent(path) == item.path
+        case (.looseFiles, _): return false
+        case (.directory, .looseFiles): return PathUtil.isAncestorOrEqual(item.path, of: path)
+        case (.directory, _): return PathUtil.isStrictAncestor(item.path, of: path)
+        }
     }
 }
 
@@ -65,15 +99,9 @@ extension Analysis {
                     continue
                 }
                 // Something inside this item went away: shrink it.
-                for removal in removals where item.kind != .file {
-                    let inside =
-                        removal.kind == .looseFiles
-                        ? (item.kind == .directory && PathUtil.isAncestorOrEqual(item.path, of: removal.path))
-                        : PathUtil.isStrictAncestor(item.path, of: removal.path)
-                    if inside {
-                        item.size -= min(item.size, removal.bytes)
-                        changed = true
-                    }
+                for removal in removals where removal.isInside(item) {
+                    item.size -= min(item.size, removal.bytes)
+                    changed = true
                 }
                 if item.size > 0 { items.append(item) } else { changed = true }
             }
@@ -93,33 +121,15 @@ extension Analysis {
 }
 
 extension CategoryBreakdown {
-    /// The category `compute(tree:findings:)` would attribute `path` to.
-    public static func category(for path: String, findings: [Finding], home: String = PathUtil.home) -> StorageCategory {
-        var current = path
-        while !current.isEmpty {
-            for finding in findings where finding.items.contains(where: { $0.kind == .directory && $0.path == current }) {
-                switch finding.rule.topCategory {
-                case "developer": return .developer
-                case "ai": return .ai
-                case "cache": return .caches
-                default: break
-                }
-            }
-            if let category = builtinLocations(home: home).first(where: { $0.0 == current })?.1 { return category }
-            if current == "/" { break }
-            current = PathUtil.parent(current)
-        }
-        return .other
-    }
-
     /// Subtracts removed bytes from the matching categories instead of recomputing the whole breakdown.
     public static func subtracting(
         _ removals: [Removal], from slices: [CategorySlice], findings: [Finding],
         home: String = PathUtil.home
     ) -> [CategorySlice] {
+        let locations = locations(home: home, findings: findings)
         var result = slices
         for removal in removals {
-            let category = category(for: removal.path, findings: findings, home: home)
+            let category = nearestCategory(for: removal.path, in: locations) ?? .other
             if let index = result.firstIndex(where: { $0.category == category }) {
                 result[index].size -= min(result[index].size, removal.bytes)
             }

@@ -50,24 +50,38 @@
                     model.jobDraft = nil
                     model.showOnboarding = false
                     model.showSafety = false
-                case "snapshot": snapshot = value
+                case "snapshot":
+                    // A bare file name only, so the PNG lands inside the debug folder.
+                    guard !value.contains("/"), value != ".", value != "..", !value.isEmpty else {
+                        try? "refused: snapshot must be a file name, not a path\n".appendLine(to: directory + "/events.log")
+                        break
+                    }
+                    snapshot = value
                 case "confirm-cleanup":
                     // Only ever inside a throwaway sandbox home, so a debug hook can't touch real data:
                     // the home must be a temp folder, every item must live inside it, and tool commands
-                    // (which act system-wide, e.g. `brew cleanup`) are refused outright.
-                    let home = PathUtil.home
+                    // (which act system-wide, e.g. `brew cleanup`) are refused outright. The home is resolved
+                    // because scanned paths are: a `/tmp/…` sandbox shows up as `/private/tmp/…` in the plan.
+                    // Items are deleted, never moved to the Trash: the Trash is the real one, outside the sandbox.
+                    let home = PathUtil.realpath(PathUtil.home) ?? PathUtil.home
                     guard home.hasPrefix("/private/tmp/") || home.hasPrefix("/private/var/folders/"),
+                        !model.config.safety.trashesEverything,
                         let pending = model.pendingCleanup,
                         pending.plan.commands.isEmpty,
                         !pending.plan.items.isEmpty,
                         pending.plan.items.allSatisfy({ PathUtil.isStrictAncestor(home, of: $0.path) })
                     else {
-                        try? "refused: plan is not confined to the sandbox home\n".appendLine(to: directory + "/events.log")
+                        try? "refused: plan is not confined to the sandbox home, or the config sends everything to the Trash\n"
+                            .appendLine(to: directory + "/events.log")
                         break
                     }
                     let started = Date()
+                    var deleting = pending.plan
+                    deleting.useTrash = false
+                    let plan = deleting
                     Task {
-                        _ = await model.execute(pending.plan) { _, _, _ in }
+                        // Never confirmed: only items the guard allows outright are removed.
+                        _ = await model.execute(plan, confirmed: false, onProgress: { _, _, _ in })
                         model.pendingCleanup = nil
                         let elapsed = Date().timeIntervalSince(started)
                         try? "cleanup applied in \(elapsed)s; analysing=\(model.isAnalysing)\n"

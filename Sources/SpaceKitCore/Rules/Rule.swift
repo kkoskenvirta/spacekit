@@ -22,9 +22,9 @@ public enum SafetyLevel: String, Codable, Sendable, CaseIterable, Comparable {
 
     public init?(alias: String) {
         switch alias.lowercased() {
-        case "safe", "regenerable", "low", "green": self = .safe
-        case "review", "caution", "medium", "yellow": self = .review
-        case "protected", "never", "keep", "high", "red", "dont-touch": self = .protected
+        case "safe", "regenerable", "low": self = .safe
+        case "review", "caution", "medium": self = .review
+        case "protected", "never", "keep", "high": self = .protected
         default: return nil
         }
     }
@@ -97,12 +97,14 @@ public struct Rule: Codable, Sendable, Identifiable, Hashable {
     public var tags: [String]
     /// File the rule was loaded from (not part of the schema).
     public var source: String?
+    /// Loaded from SpaceKit's own rule directory (not part of the schema). Only built-in rules may run
+    /// `RuleLibrary.trustedCommands` without the user listing them in `safety.allowedCommands`.
+    public var isBuiltin = false
 
     public static func == (lhs: Rule, rhs: Rule) -> Bool { lhs.id == rhs.id }
     public func hash(into hasher: inout Hasher) { hasher.combine(id) }
 
     public var isPattern: Bool { match != nil }
-    public var topCategory: String { String(category.split(separator: ".").first ?? "other") }
 
     public init(
         id: String, name: String, group: String = "", category: String = "other",
@@ -142,10 +144,7 @@ public struct Rule: Codable, Sendable, Identifiable, Hashable {
         category = try c.decodeIfPresent(String.self, forKey: .category) ?? ""
         description = try c.decodeIfPresent(String.self, forKey: .description)
         recreatedBy = try c.decodeIfPresent(String.self, forKey: .recreatedBy)
-        let single = try? c.decodeIfPresent(String.self, forKey: .path)
-        let pathList = try? c.decodeIfPresent([String].self, forKey: .path)
-        let pathsList = try c.decodeIfPresent([String].self, forKey: .paths)
-        paths = pathList ?? pathsList ?? single.map { [$0] } ?? []
+        paths = try c.decodeStringOrListIfPresent(forKey: .path) ?? c.decodeStringOrListIfPresent(forKey: .paths) ?? []
         match = try c.decodeIfPresent(PatternSpec.self, forKey: .match)
         granularity = try c.decodeIfPresent(Granularity.self, forKey: .granularity) ?? .whole
         safety = try c.decodeIfPresent(SafetySpec.self, forKey: .safety) ?? SafetySpec(level: .review)
@@ -219,13 +218,11 @@ public struct PatternSpec: Codable, Sendable, Hashable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        let many = try c.decodeIfPresent([String].self, forKey: .names)
-        let one = try c.decodeIfPresent(String.self, forKey: .name)
-        names = many ?? one.map { [$0] } ?? []
-        sibling = try PatternSpec.stringOrList(c, .sibling)
-        contains = try PatternSpec.stringOrList(c, .contains)
+        names = try c.decodeStringOrListIfPresent(forKey: .names) ?? c.decodeStringOrListIfPresent(forKey: .name) ?? []
+        sibling = try c.decodeStringOrListIfPresent(forKey: .sibling) ?? []
+        contains = try c.decodeStringOrListIfPresent(forKey: .contains) ?? []
         roots = try c.decodeIfPresent([String].self, forKey: .roots)
-        exclude = try PatternSpec.stringOrList(c, .exclude)
+        exclude = try c.decodeStringOrListIfPresent(forKey: .exclude) ?? []
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -236,11 +233,13 @@ public struct PatternSpec: Codable, Sendable, Hashable {
         try c.encodeIfPresent(roots, forKey: .roots)
         if !exclude.isEmpty { try c.encode(exclude, forKey: .exclude) }
     }
+}
 
-    private static func stringOrList(_ c: KeyedDecodingContainer<CodingKeys>, _ key: CodingKeys) throws -> [String] {
-        if let list = try? c.decodeIfPresent([String].self, forKey: key) { return list }
-        if let one = try c.decodeIfPresent(String.self, forKey: key) { return [one] }
-        return []
+extension KeyedDecodingContainer {
+    /// A value written either as one string or as a list of strings.
+    func decodeStringOrListIfPresent(forKey key: Key) throws -> [String]? {
+        if let list = try? decodeIfPresent([String].self, forKey: key) { return list }
+        return try decodeIfPresent(String.self, forKey: key).map { [$0] }
     }
 }
 
@@ -269,22 +268,22 @@ public struct SafetySpec: Codable, Sendable, Hashable {
 
 /// Suggested automation for a rule. Jobs created from the rule start with these values.
 public struct PolicySpec: Codable, Sendable, Hashable {
-    /// `size`, `age` or `schedule`; informational, the fields below are what count.
-    public var type: String?
+    public enum Kind: String, Codable, Sendable { case size, age, schedule }
+
+    /// Informational; the fields below are what count.
+    public var type: Kind?
     /// Clean when the total grows beyond this.
     public var threshold: ByteCount?
     /// Only clean items untouched for at least this long.
     public var olderThan: Age?
     /// Never clean items used within this window (`active_projects`).
     public var keepRecent: Age?
-    /// `daily`, `weekly`, `monthly`.
-    public var schedule: String?
-    /// `observe`, `suggest` or `automatic`.
-    public var mode: String?
+    public var schedule: Schedule?
+    public var mode: Job.Mode?
 
     public init(
-        type: String? = nil, threshold: ByteCount? = nil, olderThan: Age? = nil, keepRecent: Age? = nil, schedule: String? = nil,
-        mode: String? = nil
+        type: Kind? = nil, threshold: ByteCount? = nil, olderThan: Age? = nil, keepRecent: Age? = nil, schedule: Schedule? = nil,
+        mode: Job.Mode? = nil
     ) {
         self.type = type
         self.threshold = threshold
@@ -292,6 +291,18 @@ public struct PolicySpec: Codable, Sendable, Hashable {
         self.keepRecent = keepRecent
         self.schedule = schedule
         self.mode = mode
+    }
+
+    enum CodingKeys: String, CodingKey { case type, threshold, olderThan, keepRecent, schedule, mode }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        type = try c.decodeIfPresent(Kind.self, forKey: .type)
+        threshold = try c.decodeIfPresent(ByteCount.self, forKey: .threshold)
+        olderThan = try c.decodeRetentionIfPresent(forKey: .olderThan)
+        keepRecent = try c.decodeRetentionIfPresent(forKey: .keepRecent)
+        schedule = try c.decodeIfPresent(Schedule.self, forKey: .schedule)
+        mode = try c.decodeIfPresent(Job.Mode.self, forKey: .mode)
     }
 }
 
@@ -318,8 +329,8 @@ public struct ActionSpec: Codable, Sendable, Hashable {
     public init(from decoder: Decoder) throws {
         if let word = try? decoder.singleValueContainer().decode(String.self) {
             switch word.lowercased() {
-            case "remove", "trash", "delete", "clean": self = ActionSpec(remove: true)
-            case "none", "manual", "report": self = ActionSpec()
+            case "remove": self = ActionSpec(remove: true)
+            case "none": self = ActionSpec()
             default:
                 throw DecodingError.dataCorrupted(
                     .init(
@@ -336,6 +347,9 @@ public struct ActionSpec: Codable, Sendable, Hashable {
     }
 
     public var isCleanable: Bool { remove || command != nil || itemCommand != nil }
+
+    /// Any action at all, including manual instructions. Protected rules may have none.
+    public var isEmpty: Bool { !isCleanable && manual == nil }
 }
 
 /// Extra knowledge for the AI Development view.
@@ -345,8 +359,22 @@ public struct AISpec: Codable, Sendable, Hashable {
     /// How models are laid out on disk: `ollama`, `huggingface`, `lmstudio`, `children` (each entry is a model) or `cache`.
     public var layout: String
 
-    public init(tool: String, layout: String) {
+    /// How the tool removes one model, e.g. `[ollama, rm, "{name}"]`; `{name}` is the model's name as the AI view
+    /// shows it. Use this when a model's files are shared with others (Ollama blobs), so only the tool can tell
+    /// what may go.
+    public var removeCommand: [String]?
+
+    /// Every `layout` the AI view understands; anything else is shown as a cache.
+    public static let layouts: Set<String> = ["ollama", "huggingface", "lmstudio", "children", "cache"]
+
+    public init(tool: String, layout: String, removeCommand: [String]? = nil) {
         self.tool = tool
         self.layout = layout
+        self.removeCommand = removeCommand
+    }
+
+    /// `removeCommand` filled in for one model, or `nil` if the rule has none.
+    public func removeArguments(forModel name: String) -> [String]? {
+        removeCommand?.map { $0.replacingOccurrences(of: "{name}", with: name) }
     }
 }

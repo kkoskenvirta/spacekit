@@ -9,9 +9,7 @@ public struct MountedVolume: Sendable, Hashable, Identifiable {
     public let device: String
     public let fileSystem: String
     public let deviceID: dev_t
-    public let isReadOnly: Bool
     public let isBrowsable: Bool
-    public let isLocal: Bool
 
     /// The APFS container (or whole disk) this volume lives on, e.g. `disk3` for `/dev/disk3s5` or `/dev/disk3s1s1`.
     public var container: String? {
@@ -84,17 +82,17 @@ public struct VolumeCapacity: Sendable, Codable, Hashable {
 
 /// Local Time Machine snapshots, which keep deleted files' blocks allocated until they're thinned.
 public enum LocalSnapshots {
-    /// Snapshot names on the volume (empty if there are none or `tmutil` isn't available).
-    public static func list(volume: String = "/") -> [String] {
-        let result = Shell.run("/usr/bin/tmutil", ["listlocalsnapshots", volume], timeout: 10)
+    /// Snapshot names on the startup disk (empty if there are none or `tmutil` isn't available).
+    public static func list() -> [String] {
+        let result = Shell.run("/usr/bin/tmutil", ["listlocalsnapshots", "/"], timeout: 10)
         guard result.status == 0 else { return [] }
         return result.output.split(separator: "\n").map(String.init).filter { $0.contains("com.apple.") && !$0.hasPrefix("Snapshots") }
     }
 
     /// The command that releases snapshot-held space right away. It must be run by the person, in Terminal;
     /// SpaceKit never thins backups itself.
-    public static func thinCommand(volume: String = "/") -> String {
-        "tmutil thinlocalsnapshots \(volume) 999999999999 4"
+    public static func thinCommand() -> String {
+        "tmutil thinlocalsnapshots / 999999999999 4"
     }
 }
 
@@ -134,10 +132,6 @@ public struct VolumeTable: Sendable {
         return Set(volumes.filter { $0.container == container }.map(\.deviceID))
     }
 
-    public func isMountPoint(_ path: String) -> Bool {
-        volumes.contains { $0.mountPoint == path }
-    }
-
     /// Data-volume paths that are reachable through a firmlink from inside `scanRoot`, and would
     /// therefore be counted twice. Returns absolute paths such as `/System/Volumes/Data/Users`.
     public func duplicateFirmlinkTargets(whenScanning scanRoot: String) -> Set<String> {
@@ -169,16 +163,13 @@ public struct VolumeTable: Sendable {
             }
             var st = stat()
             guard lstat(mountPoint, &st) == 0 else { continue }
-            let flags = entry.f_flags
             result.append(
                 MountedVolume(
                     mountPoint: mountPoint,
                     device: device,
                     fileSystem: fsType,
                     deviceID: st.st_dev,
-                    isReadOnly: flags & UInt32(MNT_RDONLY) != 0,
-                    isBrowsable: flags & UInt32(MNT_DONTBROWSE) == 0,
-                    isLocal: flags & UInt32(MNT_LOCAL) != 0
+                    isBrowsable: entry.f_flags & UInt32(MNT_DONTBROWSE) == 0
                 ))
         }
         return result

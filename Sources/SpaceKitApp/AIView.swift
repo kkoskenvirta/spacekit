@@ -40,16 +40,16 @@ struct AIView: View {
         let days = Int(report.activeWindow.days)
         return HStack(spacing: 12) {
             StatTile(
-                title: "AI storage", value: report.total.bytesText, detail: "\(report.tools.count) tools", symbol: "cpu",
+                title: "AI storage", value: report.total.formattedBytes, detail: "\(report.tools.count) tools", symbol: "cpu",
                 tint: Theme.categorical[2])
             StatTile(
-                title: "Potentially reclaimable", value: report.reclaimable().bytesText, detail: "Caches, orphaned blobs, idle models",
+                title: "Potentially reclaimable", value: report.reclaimable().formattedBytes, detail: "Caches, orphaned blobs, idle models",
                 symbol: "arrow.down.circle", tint: Theme.good)
             StatTile(
-                title: "Actively using", value: report.active().bytesText, detail: "Used in the last \(days) days",
+                title: "Actively using", value: report.active().formattedBytes, detail: "Used in the last \(days) days",
                 symbol: "bolt.circle", tint: Theme.categorical[0])
             StatTile(
-                title: "Unused \(days)+ days", value: report.unused().bytesText, detail: "Candidates to remove",
+                title: "Unused \(days)+ days", value: report.unused().formattedBytes, detail: "Candidates to remove",
                 symbol: "moon.zzz", tint: Theme.warning)
         }
     }
@@ -66,7 +66,7 @@ private struct ToolCard: View {
                 HStack {
                     Text(tool.name).font(.headline)
                     Spacer()
-                    Text(tool.size.bytesText).font(.title3.weight(.semibold)).monospacedDigit()
+                    Text(tool.size.formattedBytes).font(.title3.weight(.semibold)).monospacedDigit()
                 }
                 Table(tool.models) {
                     TableColumn("Model") { model in
@@ -75,16 +75,16 @@ private struct ToolCard: View {
                             Text(model.name).lineLimit(1).truncationMode(.middle)
                         }
                     }
-                    TableColumn("Size") { model in Text(model.size.bytesText).monospacedDigit() }
+                    TableColumn("Size") { model in Text(model.size.formattedBytes).monospacedDigit() }
                         .width(min: 70, ideal: 80, max: 100)
                     TableColumn("Status") { model in status(model) }
                         .width(min: 80, ideal: 90, max: 110)
-                    TableColumn("Last used") { model in Text(model.lastUsed?.shortRelative ?? "—").foregroundStyle(.secondary) }
+                    TableColumn("Last used") { model in Text(model.lastUsed?.relativeDescription() ?? "—").foregroundStyle(.secondary) }
                         .width(min: 90, ideal: 110, max: 140)
                     TableColumn("") { item in
                         Button("Remove…") { remove(item) }
                             .controlSize(.small)
-                            .disabled(item.removeCommand == nil && item.paths.isEmpty)
+                            .disabled(!item.isRemovable)
                     }
                     .width(76)
                 }
@@ -96,17 +96,11 @@ private struct ToolCard: View {
 
     @ViewBuilder
     private func status(_ model: AIModel) -> some View {
-        switch model.kind {
-        case .orphaned:
-            Label("Orphaned", systemImage: "exclamationmark.circle").foregroundStyle(Theme.warning)
-        case .cache:
-            Label("Cache", systemImage: "archivebox").foregroundStyle(.secondary)
-        default:
-            if model.isActive(within: window) {
-                Label("Active", systemImage: "bolt.fill").foregroundStyle(Theme.good)
-            } else {
-                Label("Idle", systemImage: "moon.zzz").foregroundStyle(Theme.warning)
-            }
+        switch model.status(within: window) {
+        case .orphaned: Label("Orphaned", systemImage: "exclamationmark.circle").foregroundStyle(Theme.warning)
+        case .cache: Label("Cache", systemImage: "archivebox").foregroundStyle(.secondary)
+        case .active: Label("Active", systemImage: "bolt.fill").foregroundStyle(Theme.good)
+        case .idle: Label("Idle", systemImage: "moon.zzz").foregroundStyle(Theme.warning)
         }
     }
 
@@ -120,25 +114,7 @@ private struct ToolCard: View {
     }
 
     private func remove(_ item: AIModel) {
-        var plan = CleanupPlan(useTrash: true)
-        if let command = item.removeCommand {
-            // The tool knows which blobs other models still share.
-            plan.commands = [PlannedCommand(ruleID: item.ruleID, arguments: command, estimatedBytes: item.size)]
-        } else {
-            plan.items = item.paths.map { path in
-                var isDirectory: ObjCBool = false
-                FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
-                var size = item.size
-                if item.paths.count > 1 {
-                    var st = stat()
-                    size = lstat(path, &st) == 0 ? UInt64(max(0, st.st_blocks)) * 512 : 0
-                }
-                return CleanupItem(
-                    path: path, kind: isDirectory.boolValue ? .directory : .file,
-                    name: item.paths.count == 1 ? item.name : PathUtil.lastComponent(path),
-                    size: size, ruleID: item.ruleID, lastUsed: item.lastUsed)
-            }
-        }
+        guard let plan = CleanupPlan.removing(item, created: model.analysisScanStarted) else { return }
         model.review(plan, title: "Remove \(item.name)")
     }
 }

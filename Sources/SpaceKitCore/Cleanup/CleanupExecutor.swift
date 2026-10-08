@@ -18,6 +18,21 @@ public enum CleanupOutcome: Sendable, Equatable {
         return false
     }
 
+    public var isWouldRemove: Bool {
+        if case .wouldRemove = self { return true }
+        return false
+    }
+
+    public var isSkipped: Bool {
+        if case .skipped = self { return true }
+        return false
+    }
+
+    public var isFailed: Bool {
+        if case .failed = self { return true }
+        return false
+    }
+
     /// Where a trashed item went. `nil` if it was deleted permanently (or not removed).
     public var trashedTo: String? {
         if case .removed(_, let trashedTo) = self { return trashedTo }
@@ -29,10 +44,21 @@ public struct CleanupReport: Sendable {
     public var items: [(item: CleanupItem, outcome: CleanupOutcome)] = []
     public var commands: [(command: PlannedCommand, outcome: CleanupOutcome, output: String)] = []
     public var dryRun: Bool
+    /// Problems that didn't stop an item but must not go unnoticed: journal writes that failed, and loose
+    /// files that couldn't be removed while the rest of their folder was.
+    public var warnings: [String] = []
+    /// Trash destinations of loose files moved to the Trash, keyed by the folder (the loose-files item's `path`).
+    public var trashedLooseFiles: [String: [String]] = [:]
+    /// Bytes deleted from items that failed part way, keyed by the item's `path`. Their outcome is `.failed`; these
+    /// bytes are gone all the same, so they count in `freedBytes` and were journaled and charged to the budget.
+    public var partiallyFreed: [String: UInt64] = [:]
 
     /// Everything taken off its original location, including what went to the Trash.
     public var freedBytes: UInt64 {
-        items.reduce(0) { $0 &+ $1.outcome.freedBytes } &+ commands.reduce(0) { $0 &+ $1.outcome.freedBytes }
+        let itemBytes = items.reduce(0) { $0 &+ $1.outcome.freedBytes }
+        let commandBytes = commands.reduce(0) { $0 &+ $1.outcome.freedBytes }
+        let partialBytes = partiallyFreed.values.reduce(0, &+)
+        return itemBytes &+ commandBytes &+ partialBytes
     }
 
     /// Moved to the Trash: still using disk space until the Trash is emptied.
@@ -52,14 +78,6 @@ public struct CleanupReport: Sendable {
         return parts.joined(separator: " and ")
     }
 
-    public var wouldFreeBytes: UInt64 {
-        let all = items.map(\.outcome) + commands.map(\.outcome)
-        return all.reduce(0) { total, outcome in
-            if case .wouldRemove(let bytes) = outcome { return total &+ bytes }
-            return total
-        }
-    }
-
     public var skipped: [(item: CleanupItem, reason: String)] {
         items.compactMap { entry in
             if case .skipped(let reason) = entry.outcome { return (entry.item, reason) }
@@ -76,36 +94,79 @@ public struct CleanupReport: Sendable {
 }
 
 /// Carries out cleanup plans. Every item is re-checked by the `SafetyGuard` immediately before it is
-/// touched, every removal is journaled, and automatic runs stop at the configured byte budget.
+/// touched, every removal is journaled as it happens, and automatic runs stop at the configured byte budget.
 public struct CleanupExecutor: Sendable {
     public var safety: SafetyGuard
     public var journal: Journal?
     public var rules: [String: Rule]
-    /// Executables allowed beyond `RuleLibrary.trustedCommands`.
+    /// Executables allowed beyond `RuleLibrary.trustedCommands`. The only executables rules from outside the
+    /// built-in library may run.
     public var extraAllowedCommands: Set<String>
     /// Upper bound for one automatic run.
     public var maxBytesPerAutomaticRun: UInt64
-    public var commandTimeout: TimeInterval
+    /// Set when the config file exists but couldn't be read. Every removal and command is then refused, because
+    /// the defaults in use lack the person's protected paths, allowed commands and disabled rules.
+    public var configError: String?
+    /// `safety.trash: always`: items are moved to the Trash even when a plan asks to delete them. Entries already in
+    /// the Trash can still be deleted (that's emptying it).
+    public var alwaysTrash: Bool
+    /// Moves a path to the Trash and returns where it went.
+    var trash: @Sendable (String) throws -> String? = CleanupExecutor.moveToTrash
+    /// Resolves the folder an item is removed from. Tests replace it to swap symlinks at the worst moment.
+    var resolve: @Sendable (String) -> String? = PathUtil.realpath
+
+    public static let commandTimeout: TimeInterval = 600
 
     public init(
         safety: SafetyGuard, journal: Journal?, rules: [Rule], extraAllowedCommands: Set<String> = [],
-        maxBytesPerAutomaticRun: UInt64 = ByteCount.gb(100).bytes, commandTimeout: TimeInterval = 600
+        maxBytesPerAutomaticRun: UInt64 = ByteCount.gb(100).bytes, configError: String? = nil, alwaysTrash: Bool = false
     ) {
         self.safety = safety
         self.journal = journal
         self.rules = Dictionary(rules.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
         self.extraAllowedCommands = extraAllowedCommands
         self.maxBytesPerAutomaticRun = maxBytesPerAutomaticRun
-        self.commandTimeout = commandTimeout
+        self.configError = configError
+        self.alwaysTrash = alwaysTrash
     }
 
-    /// Checks one item without touching it.
+    /// Checks one item without touching it, using what the plan recorded about it.
     public func verdict(for item: CleanupItem, context: CleanupContext) -> SafetyVerdict {
+        verdict(
+            for: item, size: item.size, isRepository: item.isRepository, containsRepository: item.containsRepository, context: context)
+    }
+
+    /// `checkedDirectory`: the resolved folder the removal will act in. The item is judged there too, so the guard
+    /// has seen the exact location that changes, whatever a symlink in the item's path points at by then.
+    func verdict(
+        for item: CleanupItem, size: UInt64, isRepository: Bool, containsRepository: Bool, context: CleanupContext,
+        checkedDirectory: String? = nil
+    ) -> SafetyVerdict {
+        let rule = item.ruleID.flatMap { rules[$0] }
         // Loose files are judged as "something inside the folder", not as the folder itself.
-        let path = item.kind == .looseFiles ? PathUtil.join(item.path, "*") : item.path
-        return safety.evaluate(
-            path: path, size: item.size, rule: item.ruleID.flatMap { rules[$0] }, context: context,
-            isRepository: item.isRepository, containsRepository: item.containsRepository)
+        let path = item.kind == .looseFiles ? CleanupItem.looseFilesPath(in: item.path) : item.path
+        let name = item.kind == .looseFiles ? "*" : PathUtil.lastComponent(item.path)
+        var verdict = CleanupExecutor.judge(path, checked: checkedDirectory.map { PathUtil.join($0, name) }) { candidate in
+            safety.evaluate(
+                path: candidate, size: size, rule: rule, context: context, isRepository: isRepository,
+                containsRepository: containsRepository)
+        }
+        refuseIfConfigInvalid(&verdict)
+        return verdict
+    }
+
+    /// The verdict on `path` and, if it's spelled differently, on the same entry in the folder that was resolved
+    /// and checked: the guard sees the exact location that changes, whatever a symlink in `path` points at by then.
+    static func judge(_ path: String, checked: String?, _ evaluate: (String) -> SafetyVerdict) -> SafetyVerdict {
+        let verdict = evaluate(path)
+        guard let checked, checked != path else { return verdict }
+        return verdict.merging(evaluate(checked))
+    }
+
+    func refuseIfConfigInvalid(_ verdict: inout SafetyVerdict) {
+        if let configError {
+            verdict.raise(.block, "Config file is invalid: \(configError). Fix it (spacekit config validate) before cleaning.")
+        }
     }
 
     public func execute(
@@ -114,166 +175,77 @@ public struct CleanupExecutor: Sendable {
         dryRun: Bool,
         onProgress: (@Sendable (_ completed: Int, _ total: Int, _ current: String) -> Void)? = nil
     ) -> CleanupReport {
-        var report = CleanupReport(dryRun: dryRun)
-        var journalEntries: [JournalEntry] = []
-        let confirmed: Bool
-        let jobID: String?
-        switch context {
-        case .manual(let c):
-            confirmed = c
-            jobID = nil
-        case .automatic(let automation):
-            confirmed = false
-            jobID = automation.jobID
-        }
-        var budget = context.isAutomatic ? maxBytesPerAutomaticRun : UInt64.max
+        var run = Run(report: CleanupReport(dryRun: dryRun), budget: context.isAutomatic ? maxBytesPerAutomaticRun : .max)
         let total = plan.items.count + plan.commands.count
         var completed = 0
 
         for item in plan.items {
             onProgress?(completed, total, item.path)
             completed += 1
-            let outcome = removeItem(item, plan: plan, context: context, confirmed: confirmed, dryRun: dryRun, budget: &budget)
-            if case .removed(let bytes, let trashedTo) = outcome {
-                journalEntries.append(
-                    JournalEntry(
-                        path: item.kind == .looseFiles ? item.path + "/*" : item.path, bytes: bytes,
-                        method: plan.useTrash ? .trash : .delete, ruleID: item.ruleID, jobID: jobID,
-                        automatic: context.isAutomatic, trashedTo: trashedTo))
-            }
-            report.items.append((item, outcome))
+            let outcome = removeItem(item, plan: plan, context: context, run: &run)
+            run.report.items.append((item, outcome))
         }
-
         for command in plan.commands {
             onProgress?(completed, total, command.displayString)
             completed += 1
-            let (outcome, output) = run(command, context: context, dryRun: dryRun, budget: &budget)
-            if case .removed(let bytes, _) = outcome {
-                journalEntries.append(
-                    JournalEntry(
-                        path: command.displayString, bytes: bytes, method: .command, ruleID: command.ruleID, jobID: jobID,
-                        automatic: context.isAutomatic))
-            }
-            report.commands.append((command, outcome, output))
+            let (outcome, output) = runCommand(command, context: context, run: &run)
+            run.report.commands.append((command, outcome, output))
         }
         onProgress?(total, total, "")
-
-        if !dryRun { try? journal?.append(journalEntries) }
-        return report
+        return run.report
     }
 
-    // MARK: Files
+    /// State carried through one execution.
+    struct Run {
+        var report: CleanupReport
+        var budget: UInt64
+        var dryRun: Bool { report.dryRun }
 
-    private func removeItem(
-        _ item: CleanupItem, plan: CleanupPlan, context: CleanupContext, confirmed: Bool,
-        dryRun: Bool, budget: inout UInt64
-    ) -> CleanupOutcome {
-        var st = stat()
-        guard lstat(item.path, &st) == 0 else { return .skipped(reason: "Already gone") }
+        mutating func charge(_ bytes: UInt64) { budget -= min(budget, bytes) }
+    }
 
-        let verdict = verdict(for: item, context: context)
-        guard verdict.permits(confirmed: confirmed) else {
-            let prefix = verdict.decision == .confirm ? "Needs confirmation: " : "Blocked: "
-            return .skipped(reason: prefix + verdict.reasons.joined(separator: "; "))
-        }
-        if context.isAutomatic {
-            if !plan.useTrash, let rule = item.ruleID.flatMap({ rules[$0] }), rule.safety.level != .safe {
-                return .skipped(reason: "Automatic permanent deletion is only allowed for regenerable (safe) items")
-            }
-            guard item.size <= budget else {
-                return .skipped(reason: "Over this run's budget of \(ByteCount.format(maxBytesPerAutomaticRun)) (safety.maxBytesPerRun)")
-            }
-        }
-        if dryRun { return .wouldRemove(bytes: item.size) }
-
+    /// Writes one journal entry right away, so a run that is interrupted still leaves a record of what it removed.
+    func record(_ entry: JournalEntry, in run: inout Run) {
+        guard let journal, !run.dryRun else { return }
         do {
-            switch item.kind {
-            case .directory, .file:
-                // Things already in the Trash can only be removed by deleting them.
-                let inTrash = PathUtil.isStrictAncestor(PathUtil.home + "/.Trash", of: item.path)
-                let trashedTo = try remove(item.path, toTrash: plan.useTrash && !inTrash)
-                budget -= min(budget, item.size)
-                return .removed(bytes: item.size, trashedTo: trashedTo)
-            case .looseFiles:
-                let inTrash = PathUtil.isAncestorOrEqual(PathUtil.home + "/.Trash", of: item.path)
-                let freed = try removeLooseFiles(in: item, toTrash: plan.useTrash && !inTrash, context: context, confirmed: confirmed)
-                budget -= min(budget, freed)
-                return .removed(bytes: freed, trashedTo: nil)
-            }
+            try journal.append([entry])
         } catch {
-            return .failed(reason: error.localizedDescription)
+            run.report.warnings.append(
+                "Couldn't write to the journal \(PathUtil.abbreviate(journal.file)): \(error.localizedDescription). "
+                    + "\(PathUtil.abbreviate(entry.path)) was removed but isn't recorded there.")
         }
     }
 
-    /// Removes one file system item. Returns where it went if it was trashed.
-    private func remove(_ path: String, toTrash: Bool) throws -> String? {
-        let url = URL(fileURLWithPath: path)
-        if toTrash {
-            var resulting: NSURL?
-            try FileManager.default.trashItem(at: url, resultingItemURL: &resulting)
-            return resulting?.path
-        }
-        // removefile(3) is much faster than FileManager for large trees and never follows symlinks.
-        let state = removefile_state_alloc()
-        defer { removefile_state_free(state) }
-        if removefile(path, state, removefile_flags_t(REMOVEFILE_RECURSIVE)) != 0 {
-            throw CocoaError(
-                .fileWriteNoPermission, userInfo: [NSFilePathErrorKey: path, NSLocalizedDescriptionKey: String(cString: strerror(errno))])
-        }
+    func entry(
+        path: String, bytes: UInt64, method: JournalEntry.Method, ruleID: String?, context: CleanupContext, trashedTo: String? = nil
+    ) -> JournalEntry {
+        JournalEntry(
+            path: path, bytes: bytes, method: method, ruleID: ruleID, jobID: CleanupExecutor.jobID(context),
+            automatic: context.isAutomatic, trashedTo: trashedTo)
+    }
+
+    static func isConfirmed(_ context: CleanupContext) -> Bool {
+        if case .manual(let confirmed) = context { return confirmed }
+        return false
+    }
+
+    static func jobID(_ context: CleanupContext) -> String? {
+        if case .automatic(let automation) = context { return automation.jobID }
         return nil
     }
 
-    /// Removes the plain files directly inside `directory`, leaving subdirectories alone.
-    private func removeLooseFiles(in item: CleanupItem, toTrash: Bool, context: CleanupContext, confirmed: Bool) throws -> UInt64 {
-        var freed: UInt64 = 0
-        let rule = item.ruleID.flatMap { rules[$0] }
-        for name in try FileManager.default.contentsOfDirectory(atPath: item.path) {
-            let path = PathUtil.join(item.path, name)
-            var st = stat()
-            guard lstat(path, &st) == 0, (st.st_mode & S_IFMT) != S_IFDIR else { continue }
-            guard safety.evaluate(path: path, rule: rule, context: context).permits(confirmed: confirmed) else { continue }
-            let size = UInt64(max(0, st.st_blocks)) * 512
-            _ = try remove(path, toTrash: toTrash)
-            freed &+= size
-        }
-        return freed
+    static func refusal(_ verdict: SafetyVerdict) -> CleanupOutcome {
+        let prefix = verdict.decision == .confirm ? "Needs confirmation: " : "Blocked: "
+        return .skipped(reason: prefix + verdict.reasons.joined(separator: "; "))
     }
 
-    // MARK: Commands
-
-    private func run(_ command: PlannedCommand, context: CleanupContext, dryRun: Bool, budget: inout UInt64) -> (CleanupOutcome, String) {
-        guard let executableName = command.arguments.first else { return (.failed(reason: "Empty command"), "") }
-        let name = PathUtil.lastComponent(executableName)
-        guard RuleLibrary.trustedCommands.contains(name) || extraAllowedCommands.contains(name) else {
-            return (.skipped(reason: "'\(name)' isn't a trusted command; add it to safety.allowedCommands to allow it"), "")
-        }
-        if let rule = rules[command.ruleID] {
-            if rule.safety.level == .protected { return (.skipped(reason: "\(rule.name) is protected"), "") }
-            if case .automatic(let automation) = context, rule.safety.level == .review, !automation.allowReview {
-                return (.skipped(reason: "\(rule.name) needs review; the job doesn't include review items"), "")
-            }
-        }
-        guard let executable = Shell.which(executableName) else {
-            return (.skipped(reason: "'\(name)' is not installed"), "")
-        }
-        if dryRun { return (.wouldRemove(bytes: command.estimatedBytes), "") }
-
-        let before = measure(command.measurePaths)
-        let result = Shell.run(executable, Array(command.arguments.dropFirst()), timeout: commandTimeout)
-        guard result.status == 0 else {
-            return (.failed(reason: "Exited with status \(result.status)"), result.output)
-        }
-        let after = measure(command.measurePaths)
-        let freed = before > after ? before - after : 0
-        budget -= min(budget, freed)
-        return (.removed(bytes: freed, trashedTo: nil), result.output)
+    func overBudget() -> CleanupOutcome {
+        .skipped(reason: "Over this run's budget of \(ByteCount.format(maxBytesPerAutomaticRun)) (safety.maxBytesPerRun)")
     }
 
-    private func measure(_ paths: [String]) -> UInt64 {
-        let existing = paths.filter { FileManager.default.fileExists(atPath: $0) }
-        guard !existing.isEmpty else { return 0 }
-        var options = ScanOptions()
-        options.minFileSize = .max
-        return (try? Scanner(options: options).scan(roots: existing).root.size) ?? 0
+    static func moveToTrash(_ path: String) throws -> String? {
+        var resulting: NSURL?
+        try FileManager.default.trashItem(at: URL(fileURLWithPath: path), resultingItemURL: &resulting)
+        return resulting?.path
     }
 }

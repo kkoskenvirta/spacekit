@@ -10,12 +10,18 @@ public struct CleanupItem: Codable, Sendable, Identifiable, Hashable {
     public var isRepository: Bool
     public var containsRepository: Bool
     public var lastUsed: Date?
+    /// For loose files: the names the preview counted, the only ones the executor removes. `nil` for other kinds,
+    /// and for loose-files items saved before names were recorded (those can't remove anything; refresh them).
+    public var looseFileNames: [String]?
 
-    public var id: String { kind == .looseFiles ? path + "/*" : path }
+    public var id: String { kind == .looseFiles ? CleanupItem.looseFilesPath(in: path) : path }
+
+    /// How "the plain files directly inside `directory`" is written in verdicts, ids and the journal.
+    public static func looseFilesPath(in directory: String) -> String { PathUtil.join(directory, "*") }
 
     public init(
         path: String, kind: FindingItem.Kind = .directory, name: String? = nil, size: UInt64, ruleID: String? = nil,
-        isRepository: Bool = false, containsRepository: Bool = false, lastUsed: Date? = nil
+        isRepository: Bool = false, containsRepository: Bool = false, lastUsed: Date? = nil, looseFileNames: [String]? = nil
     ) {
         self.path = path
         self.kind = kind
@@ -25,12 +31,14 @@ public struct CleanupItem: Codable, Sendable, Identifiable, Hashable {
         self.isRepository = isRepository
         self.containsRepository = containsRepository
         self.lastUsed = lastUsed
+        self.looseFileNames = looseFileNames
     }
 
     public init(_ item: FindingItem, ruleID: String?) {
         self.init(
             path: item.path, kind: item.kind, name: item.displayName, size: item.size, ruleID: ruleID,
-            isRepository: item.isRepository, containsRepository: item.containsRepository, lastUsed: item.lastUsed)
+            isRepository: item.isRepository, containsRepository: item.containsRepository, lastUsed: item.lastUsed,
+            looseFileNames: item.looseFileNames)
     }
 }
 
@@ -42,13 +50,23 @@ public struct PlannedCommand: Codable, Sendable, Hashable, Identifiable {
     public var estimatedBytes: UInt64
     /// Paths the command is expected to shrink; rescanned afterwards to measure the result.
     public var measurePaths: [String]
+    /// For a rule's `itemCommand`: the item substituted for `{path}` and `{name}`. The executor checks it with
+    /// the `SafetyGuard` like any other item. `nil` for whole-rule commands.
+    public var itemPath: String?
+    /// For a rule's `ai.removeCommand`: the model substituted for `{name}`. `nil` otherwise.
+    public var modelName: String?
     public var id: String { ruleID + ":" + arguments.joined(separator: " ") }
 
-    public init(ruleID: String, arguments: [String], estimatedBytes: UInt64, measurePaths: [String] = []) {
+    public init(
+        ruleID: String, arguments: [String], estimatedBytes: UInt64, measurePaths: [String] = [], itemPath: String? = nil,
+        modelName: String? = nil
+    ) {
         self.ruleID = ruleID
         self.arguments = arguments
         self.estimatedBytes = estimatedBytes
         self.measurePaths = measurePaths
+        self.itemPath = itemPath
+        self.modelName = modelName
     }
 
     public var displayString: String {
@@ -65,12 +83,19 @@ public struct CleanupPlan: Codable, Sendable {
     public var manualSteps: [String]
     /// Move items to the Trash instead of deleting them.
     public var useTrash: Bool
+    /// When the plan was made. Loose files and Trash entries changed after this weren't in the preview, so the
+    /// executor leaves them alone. `nil` only for plans saved before this existed; those can't remove loose files.
+    public var created: Date?
 
-    public init(items: [CleanupItem] = [], commands: [PlannedCommand] = [], manualSteps: [String] = [], useTrash: Bool = true) {
+    public init(
+        items: [CleanupItem] = [], commands: [PlannedCommand] = [], manualSteps: [String] = [], useTrash: Bool = true,
+        created: Date? = Date()
+    ) {
         self.items = items
         self.commands = commands
         self.manualSteps = manualSteps
         self.useTrash = useTrash
+        self.created = created
     }
 
     public var totalBytes: UInt64 {
@@ -79,14 +104,19 @@ public struct CleanupPlan: Codable, Sendable {
 
     public var isEmpty: Bool { items.isEmpty && commands.isEmpty }
 
+    /// The order every preview lists items in.
+    public var itemsLargestFirst: [CleanupItem] { items.sorted { $0.size > $1.size } }
+
     /// Builds a plan from findings. `select` chooses which items of each finding to include (all by default).
     /// `trashPreference`: `true` forces the Trash; `nil` follows each rule's `safety.trash`.
+    /// `created`: when the findings were gathered (defaults to now).
     public static func make(
         findings: [Finding],
         trashPreference: Bool? = true,
+        created: Date = Date(),
         select: (Finding) -> [FindingItem] = { $0.items }
     ) -> CleanupPlan {
-        var plan = CleanupPlan(useTrash: true)
+        var plan = CleanupPlan(useTrash: true, created: created)
         var allRulesWantDelete = !findings.isEmpty
         for finding in findings where finding.rule.safety.level != .protected {
             let rule = finding.rule
@@ -101,13 +131,10 @@ public struct CleanupPlan: Codable, Sendable {
             } else if let template = rule.action.itemCommand {
                 // Per-item commands name real entries (a toolchain, a spec repo); loose files aren't one.
                 for item in chosen where item.kind != .looseFiles {
-                    let arguments = template.map {
-                        $0.replacingOccurrences(of: "{name}", with: item.name).replacingOccurrences(of: "{path}", with: item.path)
-                    }
                     plan.commands.append(
                         PlannedCommand(
-                            ruleID: rule.id, arguments: arguments, estimatedBytes: item.size,
-                            measurePaths: [item.path]))
+                            ruleID: rule.id, arguments: itemArguments(template, path: item.path), estimatedBytes: item.size,
+                            measurePaths: [item.path], itemPath: item.path))
                 }
             } else if rule.action.remove {
                 plan.items += chosen.map { CleanupItem($0, ruleID: rule.id) }
@@ -118,5 +145,13 @@ public struct CleanupPlan: Codable, Sendable {
         }
         plan.useTrash = trashPreference ?? !allRulesWantDelete
         return plan
+    }
+
+    /// An `itemCommand` filled in for one item: `{path}` is its absolute path, `{name}` its last path component
+    /// (not the display name, which may carry a project prefix).
+    static func itemArguments(_ template: [String], path: String) -> [String] {
+        template.map {
+            $0.replacingOccurrences(of: "{name}", with: PathUtil.lastComponent(path)).replacingOccurrences(of: "{path}", with: path)
+        }
     }
 }

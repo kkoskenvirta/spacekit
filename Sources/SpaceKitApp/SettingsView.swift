@@ -204,11 +204,12 @@ private struct AutomationSettingsPane: View {
                 }
                 CommitField(
                     title: "Check for due jobs every", prompt: "1h", value: automation.checkEvery.description,
-                    validate: { Age.parse($0).map { $0.seconds >= 300 } ?? false }
+                    validate: { Age.parse($0).map { AutomationSettings.checkEveryRange.contains($0.seconds) } ?? false }
                 ) { value in
                     model.updateConfig { $0.automation.checkEvery = Age.parse(value)! }
                     if model.agentStatus?.installed == true { model.installAgent() }
                 }
+                Text("Between 5m and 24h.").font(.caption).foregroundStyle(.secondary)
                 Toggle(
                     "Notifications",
                     isOn: Binding(
@@ -221,7 +222,7 @@ private struct AutomationSettingsPane: View {
                         get: { automation.snapshot != nil },
                         set: { on in
                             model.updateConfig {
-                                $0.automation.snapshot = on ? Schedule(every: .weekly, at: "04:00", weekday: .sunday) : nil
+                                $0.automation.snapshot = on ? .defaultSnapshot : nil
                             }
                         }))
                 Text("A full analysis, used for “What grew?”. Runs in the background at low priority.").font(.caption).foregroundStyle(
@@ -247,7 +248,7 @@ private struct RulesSettingsPane: View {
     var body: some View {
         let disabled = Set(model.config.rules.disabled)
         // Show every built-in rule, including disabled ones, so they can be turned back on.
-        let all = RuleLibrary.load(directories: model.config.rules.directories).rules
+        let all = model.rulesIncludingDisabled()
         let visible =
             search.isEmpty
             ? all : all.filter { $0.name.localizedCaseInsensitiveContains(search) || $0.group.localizedCaseInsensitiveContains(search) }
@@ -271,7 +272,7 @@ private struct RulesSettingsPane: View {
                     }
                 }
             }
-            Text("Your own rules live in \(PathUtil.abbreviate(model.context.paths.userRulesDirectory)).").font(.caption).foregroundStyle(
+            Text("Your own rules live in \(PathUtil.abbreviate(model.paths.userRulesDirectory)).").font(.caption).foregroundStyle(
                 .secondary)
         }
         .padding()
@@ -282,18 +283,18 @@ private struct ConfigFilePane: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        let paths = model.context.paths
+        let paths = model.paths
         VStack(alignment: .leading, spacing: 12) {
             Text("Everything here is stored as YAML, so you can keep it in your dotfiles and edit it by hand.")
                 .foregroundStyle(.secondary)
             LabeledContent("Config", value: PathUtil.abbreviate(paths.configFile))
             LabeledContent("Your rules", value: PathUtil.abbreviate(paths.userRulesDirectory))
             LabeledContent("History & journal", value: PathUtil.abbreviate(paths.stateDirectory))
-            if let error = model.context.configError {
+            if let error = model.configError {
                 Label(error, systemImage: "xmark.octagon").foregroundStyle(Theme.critical)
             } else {
                 Label(
-                    model.context.configStore.exists ? "Config is valid" : "No config file yet — using defaults",
+                    model.configFileExists ? "Config is valid" : "No config file yet — using defaults",
                     systemImage: "checkmark.circle"
                 )
                 .foregroundStyle(Theme.good)
@@ -307,15 +308,7 @@ private struct ConfigFilePane: View {
             .padding(8)
             .background(.background.secondary, in: RoundedRectangle(cornerRadius: 8))
             HStack {
-                Button("Create Starter Config") {
-                    _ = try? model.context.configStore.initialize()
-                    model.reloadContext()
-                }
-                .disabled(model.context.configStore.exists)
-                Button("Open in Editor") {
-                    _ = try? model.context.configStore.initialize()
-                    NSWorkspace.shared.open(URL(fileURLWithPath: paths.configFile))
-                }
+                ConfigFileButtons()
                 Button("Reveal in Finder") { model.reveal(paths.configFile) }
                 Spacer()
                 Button("Reload") { model.reloadContext() }

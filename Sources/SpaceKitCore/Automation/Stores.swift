@@ -10,7 +10,6 @@ public struct JobState: Codable, Sendable {
     public var lastMatchedBytes: UInt64?
     /// Bytes the last run would clean (after conditions).
     public var lastEligibleBytes: UInt64?
-    public var lastFreedBytes: UInt64?
 
     public init(firstSeen: Date = Date()) { self.firstSeen = firstSeen }
 }
@@ -25,18 +24,24 @@ public struct JobStateStore: Sendable {
         return (try? JSONDecoder.spaceKit.decode([String: JobState].self, from: data)) ?? [:]
     }
 
-    public func save(_ states: [String: JobState]) throws {
-        let encoder = JSONEncoder.spaceKit
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try LockedFile.write(try encoder.encode(states), to: file)
+    public func update(_ jobID: String, _ change: (inout JobState) -> Void) throws {
+        try modify { states in
+            var state = states[jobID] ?? JobState()
+            change(&state)
+            states[jobID] = state
+        }
     }
 
-    public func update(_ jobID: String, _ change: (inout JobState) -> Void) throws {
-        var states = load()
-        var state = states[jobID] ?? JobState()
-        change(&state)
-        states[jobID] = state
-        try save(states)
+    /// Reads, changes and writes every job's state while holding the store's lock, so the agent, the CLI
+    /// and the app don't overwrite each other's updates.
+    public func modify(_ change: (inout [String: JobState]) throws -> Void) throws {
+        try FileLock.withLock(for: file) {
+            var states = load()
+            try change(&states)
+            let encoder = JSONEncoder.spaceKit
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            try LockedFile.write(try encoder.encode(states), to: file)
+        }
     }
 }
 
@@ -67,21 +72,37 @@ public struct SuggestionStore: Sendable {
         return ((try? JSONDecoder.spaceKit.decode([Suggestion].self, from: data)) ?? []).sorted { $0.created > $1.created }
     }
 
-    public func get(_ id: String) -> Suggestion? { all().first { $0.id == id || $0.id.hasPrefix(id) } }
+    /// Shortest id prefix `get` accepts, so a stray character can't pick a cleanup to approve.
+    public static let minimumPrefix = 4
+
+    /// The suggestion with exactly this id, or else the only one whose id starts with it
+    /// (at least `minimumPrefix` characters).
+    public func get(_ id: String) -> Suggestion? {
+        let list = all()
+        if let exact = list.first(where: { $0.id == id }) { return exact }
+        guard id.count >= SuggestionStore.minimumPrefix else { return nil }
+        let matches = list.filter { $0.id.hasPrefix(id) }
+        return matches.count == 1 ? matches[0] : nil
+    }
 
     /// Adds a suggestion, replacing any older one from the same job.
     public func add(_ suggestion: Suggestion) throws {
-        var list = all().filter { $0.jobID != suggestion.jobID }
-        list.append(suggestion)
-        try save(list)
+        try modify { list in
+            list.removeAll { $0.jobID == suggestion.jobID }
+            list.append(suggestion)
+        }
     }
 
     public func remove(_ id: String) throws {
-        try save(all().filter { $0.id != id })
+        try modify { list in list.removeAll { $0.id == id } }
     }
 
-    private func save(_ list: [Suggestion]) throws {
-        try LockedFile.write(try JSONEncoder.spaceKit.encode(list), to: file)
+    private func modify(_ change: (inout [Suggestion]) -> Void) throws {
+        try FileLock.withLock(for: file) {
+            var list = all()
+            change(&list)
+            try LockedFile.write(try JSONEncoder.spaceKit.encode(list), to: file)
+        }
     }
 }
 

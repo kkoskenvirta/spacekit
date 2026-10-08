@@ -160,24 +160,31 @@ public enum Treemap {
         let items = node.items
         guard node.size > 0, area > 0 else { return [] }
         let bytesPerPoint = Double(node.size) / Double(area)
-        let minBytes = UInt64(Double(minCellArea) * bytesPerPoint)
-        var result: [MapItem] = []
+        let split = split(items, minBytes: UInt64(Double(minCellArea) * bytesPerPoint))
+        var result = split.visible.map(MapItem.item)
+        if split.restCount == 1, let last = items.last {
+            result.append(.item(last))
+        } else if split.restCount > 1, split.restSize > 0 {
+            result.append(.remainder(parent: node, count: split.restCount, size: split.restSize))
+        }
+        return result
+    }
+
+    /// Splits items (largest first) into those big enough to draw (at least `minBytes`, and not empty)
+    /// and the count and size of the rest.
+    static func split(_ items: [DiskItem], minBytes: UInt64) -> (visible: [DiskItem], restCount: Int, restSize: UInt64) {
+        var visible: [DiskItem] = []
         var restSize: UInt64 = 0
         var restCount = 0
         for item in items {
             if item.size >= minBytes && item.size > 0 {
-                result.append(.item(item))
+                visible.append(item)
             } else {
                 restSize += item.size
                 restCount += 1
             }
         }
-        if restCount == 1, let last = items.last {
-            result.append(.item(last))
-        } else if restCount > 1, restSize > 0 {
-            result.append(.remainder(parent: node, count: restCount, size: restSize))
-        }
-        return result
+        return (visible, restCount, restSize)
     }
 
     /// The deepest cell containing `point`.

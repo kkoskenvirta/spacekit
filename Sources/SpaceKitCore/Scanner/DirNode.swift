@@ -17,9 +17,15 @@ public struct FileLeaf: Sendable, Hashable {
 /// `otherFilesSize` / `otherFilesCount`. That keeps a full-disk scan of millions of files in a
 /// few hundred megabytes while still drawing every file that's big enough to see.
 ///
-/// Thread-safety: a node's stored properties are written by exactly one scanner worker before the
-/// node is published (`isListed`), and by the single-threaded aggregation pass after the scan.
-/// After `Scanner.scan` returns, the tree is immutable and safe to read from any thread.
+/// Thread-safety: `@unchecked Sendable` rests on who writes when, not on immutability.
+/// - During a scan, the worker that lists a directory writes its stored properties, then publishes it
+///   (`isListed`, release/acquire). Other threads may read only `name`, `isListed` and `liveSize` of the
+///   nodes in `ScanProgress.liveChildren`.
+/// - When the workers finish, the scanning thread resolves hard links and aggregates totals (sorting
+///   `children` in place) before `Scanner.scan` returns.
+/// - After that, the tree changes only through `ScanTree.applyRemoval`, `applyMove`, `splice` and `rescan`, which
+///   the tree's owner calls from one thread or actor at a time. Reads on other threads must be
+///   synchronized with those calls by the owner (the app keeps its trees on the main actor).
 public final class DirNode: @unchecked Sendable, Identifiable, Hashable {
     /// Folder name; roots are named by their absolute path. Changes only when an item is moved (e.g. to the Trash).
     public internal(set) var name: String
@@ -66,8 +72,6 @@ public final class DirNode: @unchecked Sendable, Identifiable, Hashable {
         public static let firmlinkDuplicate = Flags(rawValue: 1 << 2)
         /// Matched an exclude pattern.
         public static let excluded = Flags(rawValue: 1 << 3)
-        /// Scan was cancelled before this directory was listed.
-        public static let incomplete = Flags(rawValue: 1 << 4)
 
         public static let skipped: Flags = [.otherVolume, .firmlinkDuplicate, .excluded]
     }
@@ -106,8 +110,8 @@ public final class DirNode: @unchecked Sendable, Identifiable, Hashable {
         return name.hasPrefix("/") ? PathUtil.lastComponent(name) : name
     }
 
-    /// Stable identity string for this node within its tree.
-    public var address: UInt { UInt(bitPattern: Unmanaged.passUnretained(self).toOpaque()) }
+    /// `id` as a number, for string keys.
+    public var address: UInt { UInt(bitPattern: id) }
 
     /// Bytes counted so far during a running scan (only maintained for shallow nodes).
     public var liveSize: UInt64 { liveBytes.load(ordering: .relaxed) }
@@ -117,19 +121,13 @@ public final class DirNode: @unchecked Sendable, Identifiable, Hashable {
 
     public var isSkipped: Bool { !flags.intersection(.skipped).isEmpty }
 
-    public var subtreeNewestModifiedDate: Date? {
-        subtreeNewestModified > 0 ? Date(timeIntervalSince1970: TimeInterval(subtreeNewestModified)) : nil
-    }
-
     /// Newest modification anywhere in the subtree, used as "last used".
     ///
     /// Access times are deliberately not used here: Spotlight, backup and antivirus tools read files in the
     /// background, so a folder nobody has touched in months can show an access time of a few minutes ago.
     /// They're still recorded (`subtreeNewestAccessed`) for model weights, where reads do mean use.
-    public var lastUsed: Date? { subtreeNewestModifiedDate }
-
-    public var lastAccessed: Date? {
-        subtreeNewestAccessed > 0 ? Date(timeIntervalSince1970: TimeInterval(subtreeNewestAccessed)) : nil
+    public var lastUsed: Date? {
+        subtreeNewestModified > 0 ? Date(timeIntervalSince1970: TimeInterval(subtreeNewestModified)) : nil
     }
 
     public func child(named name: String) -> DirNode? {
@@ -161,14 +159,52 @@ public final class DirNode: @unchecked Sendable, Identifiable, Hashable {
     }
 
     /// Visits every node in the subtree (pre-order) without recursion.
-    public func forEachDescendant(includingSelf: Bool = true, _ body: (DirNode) -> Bool) {
-        var stack: [DirNode] = includingSelf ? [self] : children
+    public func forEachDescendant(_ body: (DirNode) -> Bool) {
+        var stack: [DirNode] = [self]
         while let node = stack.popLast() {
             if body(node) { stack.append(contentsOf: node.children) }
         }
     }
 
     func setParent(_ parent: DirNode?) { self.parent = parent }
+
+    /// True if this node is `top` or lies under it.
+    func isWithin(_ top: DirNode) -> Bool {
+        var cursor: DirNode? = self
+        while let node = cursor {
+            if node === top { return true }
+            cursor = node.parent
+        }
+        return false
+    }
+
+    /// Takes a hard-linked file's bytes off its link `name`, which stays counted as a file of 0 bytes (so it's no
+    /// longer tracked). Updates this folder's direct totals only. Returns false if the tracked entry is missing.
+    @discardableResult
+    func dropLinkBytes(named name: String, size: UInt64, minFileSize: UInt64) -> Bool {
+        if size >= minFileSize && size > 0 {
+            guard let index = files.firstIndex(where: { $0.name == name }) else { return false }
+            files.remove(at: index)
+            otherFilesCount += 1
+        } else {
+            otherFilesSize -= min(otherFilesSize, size)
+        }
+        directFileSize -= min(directFileSize, size)
+        return true
+    }
+
+    /// Gives a hard-linked file's bytes to its link `name`, until now counted as a file of 0 bytes. Updates this
+    /// folder's direct totals only.
+    func addLinkBytes(named name: String, size: UInt64, modified: Int64, minFileSize: UInt64) {
+        if size >= minFileSize && size > 0 {
+            otherFilesCount -= min(otherFilesCount, 1)
+            let index = files.firstIndex { $0.size < size } ?? files.count
+            files.insert(FileLeaf(name: name, size: size, modified: modified), at: index)
+        } else {
+            otherFilesSize &+= size
+        }
+        directFileSize &+= size
+    }
 }
 
 /// Something that occupies space inside a directory.

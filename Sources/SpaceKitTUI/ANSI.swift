@@ -7,21 +7,12 @@ public struct Style: Sendable, Equatable {
     public var background: UInt8?
     public var bold = false
     public var dim = false
-    public var italic = false
-    public var underline = false
-    public var inverse = false
 
-    public init(
-        fg: UInt8? = nil, bg: UInt8? = nil, bold: Bool = false, dim: Bool = false,
-        italic: Bool = false, underline: Bool = false, inverse: Bool = false
-    ) {
+    public init(fg: UInt8? = nil, bg: UInt8? = nil, bold: Bool = false, dim: Bool = false) {
         self.foreground = fg
         self.background = bg
         self.bold = bold
         self.dim = dim
-        self.italic = italic
-        self.underline = underline
-        self.inverse = inverse
     }
 
     public static let plain = Style()
@@ -32,9 +23,6 @@ public struct Style: Sendable, Equatable {
         var codes: [String] = []
         if bold { codes.append("1") }
         if dim { codes.append("2") }
-        if italic { codes.append("3") }
-        if underline { codes.append("4") }
-        if inverse { codes.append("7") }
         if let foreground { codes.append("38;5;\(foreground)") }
         if let background { codes.append("48;5;\(background)") }
         return codes.isEmpty ? "" : "\u{1B}[\(codes.joined(separator: ";"))m"
@@ -59,7 +47,6 @@ public enum ANSI {
 
     // Palette (xterm-256 indices), chosen to stay readable on light and dark backgrounds.
     public static let accent: UInt8 = 75
-    public static let muted: UInt8 = 245
     public static let safe: UInt8 = 71
     public static let review: UInt8 = 178
     public static let protected: UInt8 = 167
@@ -73,57 +60,76 @@ public enum ANSI {
         }
     }
 
-    /// Display width of a string, ignoring escape sequences and counting wide characters as 2 columns.
-    public static func width(_ text: String) -> Int {
-        var total = 0
-        var inEscape = false
-        for scalar in text.unicodeScalars {
-            if inEscape {
-                if scalar == "m" { inEscape = false }
-                continue
-            }
-            if scalar == "\u{1B}" {
-                inEscape = true
-                continue
-            }
-            total += scalarWidth(scalar)
-        }
-        return total
-    }
-
-    static func scalarWidth(_ scalar: Unicode.Scalar) -> Int {
-        let v = scalar.value
-        if v == 0 || (0x300...0x36F).contains(v) || v == 0x200D || (0xFE00...0xFE0F).contains(v) { return 0 }
-        if (0x1100...0x115F).contains(v) || (0x2E80...0xA4CF).contains(v) || (0xAC00...0xD7A3).contains(v)
-            || (0xF900...0xFAFF).contains(v) || (0xFF00...0xFF60).contains(v) || (0x1F300...0x1FAFF).contains(v)
-            || (0x20000...0x3FFFD).contains(v) || v == 0x1F7E2 || v == 0x1F7E1 || v == 0x1F534
-        {
-            return 2
-        }
-        return 1
-    }
+    /// Display width of a string, ignoring escape sequences and counting wide characters and emoji as 2 columns.
+    public static func width(_ text: String) -> Int { TerminalWidth.columns(text) }
 
     /// Truncates plain text to `width` columns, adding "…" when cut.
     public static func truncate(_ text: String, to width: Int) -> String {
         guard width > 0 else { return "" }
         if self.width(text) <= width { return text }
-        var result = ""
-        var used = 0
-        for character in text {
-            let w = character.unicodeScalars.reduce(0) { $0 + scalarWidth($1) }
-            if used + w > width - 1 { break }
-            result.append(character)
-            used += w
-        }
-        return result + "…"
+        return TerminalWidth.prefix(text, columns: width - 1).text + "…"
     }
 
     /// Truncates in the middle, which keeps both ends of a path readable.
     public static func truncateMiddle(_ text: String, to width: Int) -> String {
         guard self.width(text) > width, width > 3 else { return truncate(text, to: width) }
-        let half = (width - 1) / 2
-        let characters = Array(text)
-        return String(characters.prefix(half)) + "…" + String(characters.suffix(width - 1 - half))
+        let head = TerminalWidth.prefix(text, columns: (width - 1) / 2)
+        var tail: [Character] = []
+        var used = 0
+        for character in text.reversed() {
+            let columns = TerminalWidth.columns(character)
+            if head.columns + 1 + used + columns > width { break }
+            tail.append(character)
+            used += columns
+        }
+        return head.text + "…" + String(tail.reversed())
+    }
+
+    /// Pads or cuts a styled line to exactly `width` columns, keeping its escape sequences intact.
+    static func fit(_ line: String, to width: Int) -> String {
+        let width = max(0, width)
+        let cut = TerminalWidth.prefix(line, columns: width)
+        return cut.text + reset + String(repeating: " ", count: width - cut.columns)
+    }
+
+    /// Splits a styled line into rows of at most `width` columns, breaking after a space where there is one.
+    /// Later rows keep the line's leading indent and reopen the styles in effect where the previous row ended.
+    static func wrap(_ line: String, to width: Int) -> [String] {
+        guard width > 0, self.width(line) > width else { return [line] }
+        let indent = String(repeating: " ", count: min(line.prefix { $0 == " " }.count, width / 2))
+        var rows: [String] = []
+        var rest = Substring(line)
+        var styles = ""
+        while true {
+            let lead = rows.isEmpty ? "" : indent
+            let room = width - lead.count
+            if self.width(String(rest)) <= room {
+                rows.append(lead + styles + rest)
+                return rows
+            }
+            var row = Substring(TerminalWidth.prefix(String(rest), columns: room).text)
+            if row.isEmpty { row = rest.prefix(1) }
+            if let space = row.lastIndex(of: " "), row[..<space].contains(where: { $0 != " " }) {
+                row = row[...space]
+            }
+            rows.append(lead + styles + row)
+            styles = openStyles(after: styles + row)
+            rest = rest.dropFirst(row.count).drop { $0 == " " }
+        }
+    }
+
+    /// The style sequences in `text` that no later reset cancels.
+    private static func openStyles(after text: Substring) -> String {
+        var open = ""
+        var sequence = ""
+        for character in text {
+            if sequence.isEmpty, character != "\u{1B}" { continue }
+            sequence.append(character)
+            guard sequence.count > 2, let last = character.asciiValue, (0x40...0x7E).contains(last) else { continue }
+            open = sequence == reset ? "" : open + sequence
+            sequence = ""
+        }
+        return open
     }
 
     public static func pad(_ text: String, to width: Int, alignRight: Bool = false) -> String {
@@ -172,5 +178,25 @@ extension SafetyLevel {
     public var badge: String {
         let symbol = self == .protected ? "⚠" : "●"
         return "\(symbol) \(title)".fg(ANSI.color(for: self))
+    }
+}
+
+extension SafetyVerdict.Decision {
+    /// The color of a verdict in the terminal front ends: green allowed, amber needs confirmation, red blocked.
+    public var color: UInt8 {
+        switch self {
+        case .allow: return ANSI.safe
+        case .confirm: return ANSI.review
+        case .block: return ANSI.protected
+        }
+    }
+
+    /// The mark before an item in a cleanup preview: ✓ allowed, ! needs confirmation, ✗ blocked.
+    public var mark: String {
+        switch self {
+        case .allow: return "✓".fg(color)
+        case .confirm: return "!".fg(color)
+        case .block: return "✗".fg(color)
+        }
     }
 }

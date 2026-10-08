@@ -1,5 +1,10 @@
 import Foundation
 
+extension ScanSettings {
+    /// Where pattern rules look for projects unless the config says otherwise: the home folder.
+    public static let defaultDevRoots: [String] = ["~"]
+}
+
 /// Answers "what is this folder?" for any path, so every view can label folders semantically.
 public struct RuleIndex: Sendable {
     private var exact: [String: Rule] = [:]
@@ -8,8 +13,13 @@ public struct RuleIndex: Sendable {
     /// Glob locations with their literal prefix (the part before the first wildcard), checked first.
     private var globRules: [(glob: String, prefix: String, rule: Rule)] = []
     private var byName: [String: [Rule]] = [:]
+    private let scope: RuleScope
 
-    public init(rules: [Rule], findings: [Finding] = [], home: String = PathUtil.home) {
+    /// `patternRoots`: where pattern rules without their own `roots` look (the config's `scan.devRoots`).
+    public init(
+        rules: [Rule], findings: [Finding] = [], home: String = PathUtil.home, patternRoots: [String] = ScanSettings.defaultDevRoots
+    ) {
+        scope = RuleScope(home: home, patternRoots: patternRoots)
         for rule in rules {
             for pattern in rule.paths {
                 let expanded = PathUtil.expand(pattern, home: home)
@@ -37,39 +47,23 @@ public struct RuleIndex: Sendable {
         return patternRule(for: path)
     }
 
-    /// A pattern rule matching this folder, verified against the disk (e.g. `node_modules` next to a `package.json`).
+    /// A pattern rule matching this folder, verified against the disk (e.g. `node_modules` next to a `package.json`),
+    /// and only where the engine would look for it.
     public func patternRule(for path: String) -> Rule? {
         guard let candidates = byName[PathUtil.lastComponent(path)] else { return nil }
         let fm = FileManager.default
         let parent = PathUtil.parent(path)
         return candidates.first { rule in
-            guard let match = rule.match else { return false }
-            if !match.sibling.isEmpty && !match.sibling.contains(where: { fm.fileExists(atPath: PathUtil.join(parent, $0)) }) {
-                return false
-            }
-            if !match.contains.isEmpty && !match.contains.contains(where: { fm.fileExists(atPath: PathUtil.join(path, $0)) }) {
-                return false
-            }
-            return true
+            guard scope.contains(path, rule: rule) else { return false }
+            return rule.match?.markersPresent(
+                sibling: { fm.fileExists(atPath: PathUtil.join(parent, $0)) },
+                inside: { fm.fileExists(atPath: PathUtil.join(path, $0)) }) ?? false
         }
     }
-
-    /// The rule for this path or its nearest ancestor (so files deep inside DerivedData are recognised).
-    public func rule(containing path: String) -> Rule? {
-        var current = path
-        while current != "/" && !current.isEmpty {
-            if let rule = rule(for: current) { return rule }
-            current = PathUtil.parent(current)
-        }
-        return nil
-    }
-
-    /// A pattern rule whose folder name matches, without checking markers. Used only as a hint.
-    public func patternHint(forName name: String) -> Rule? { byName[name]?.first }
 }
 
-/// Memoizes `RuleIndex.rule(containing:)` for one pass over many related paths (a map layout, a list).
-/// Not thread-safe: use one per task.
+/// The rule for a path or its nearest ancestor (so files deep inside DerivedData are recognised), memoized
+/// for one pass over many related paths (a map layout, a list). Not thread-safe: use one per task.
 public final class RuleLookupCache {
     public let index: RuleIndex
     private var containing: [String: Rule?] = [:]

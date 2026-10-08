@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 
 @testable import SpaceKitCore
 
@@ -40,11 +41,7 @@ final class TempTree {
     }
 
     /// Allocated size the way the scanner measures it.
-    func allocated(_ relative: String) -> UInt64 {
-        var st = stat()
-        guard lstat(path(relative), &st) == 0 else { return 0 }
-        return UInt64(st.st_blocks) * 512
-    }
+    func allocated(_ relative: String) -> UInt64 { FileSize.allocated(atPath: path(relative)) ?? 0 }
 }
 
 func scan(_ path: String, minFileSize: UInt64 = 0, markers: [String] = [], configure: (inout ScanOptions) -> Void = { _ in }) throws
@@ -63,4 +60,33 @@ let emptyVolumes = VolumeTable(volumes: [], firmlinks: [])
 
 func testGuard(home: String = "/Users/tester", protectedPaths: [String] = [], rules: [Rule] = [], root: Bool = false) -> SafetyGuard {
     SafetyGuard(home: home, userProtectedPaths: protectedPaths, protectedRules: rules, volumes: emptyVolumes, isRunningAsRoot: root)
+}
+
+/// Moves items into `home/.Trash` (renaming on collision, like Finder), so no test ever reaches the real Trash.
+func sandboxTrash(home: String) -> @Sendable (String) throws -> String? {
+    { path in
+        let trash = home + "/.Trash"
+        try FileManager.default.createDirectory(atPath: trash, withIntermediateDirectories: true)
+        var destination = trash + "/" + PathUtil.lastComponent(path)
+        var counter = 2
+        while FileManager.default.fileExists(atPath: destination) {
+            destination = trash + "/\(PathUtil.lastComponent(path)) \(counter)"
+            counter += 1
+        }
+        try FileManager.default.moveItem(atPath: path, toPath: destination)
+        return destination
+    }
+}
+
+private let umaskLock = Mutex(())
+
+/// Runs `body` with the process umask set to `mask`, then restores it. Tests run in parallel and the umask is
+/// process-wide, so callers take turns. Use 077 rather than 002: files other tests write meanwhile come out
+/// 0600 and folders 0700, which SpaceKit still trusts, while modes left to the umask still show up.
+func withUmask<T>(_ mask: mode_t, _ body: () throws -> T) throws -> T {
+    try umaskLock.withLock { _ in
+        let previous = umask(mask)
+        defer { umask(previous) }
+        return try body()
+    }
 }

@@ -48,7 +48,7 @@ struct ExploreHeader: View {
             Menu {
                 Section("Volumes") {
                     ForEach(model.volumes, id: \.mountPoint) { volume in
-                        Button("\(volume.name) — \(volume.used.bytesText) of \(volume.total.bytesText)") { model.scan(volume.mountPoint) }
+                        Button("\(volume.name) — \(volume.used.formattedBytes) of \(volume.total.formattedBytes)") { model.scan(volume.mountPoint) }
                     }
                 }
                 Section("Places") {
@@ -138,7 +138,7 @@ struct Breadcrumb: View {
             }
             Spacer()
             if let focus = model.focus {
-                Text("\(focus.size.bytesText) · \(focus.fileCount.formatted()) files").font(.callout).foregroundStyle(.secondary)
+                Text("\(focus.size.formattedBytes) · \(focus.fileCount.formatted()) files").font(.callout).foregroundStyle(.secondary)
                     .monospacedDigit()
             }
         }
@@ -217,7 +217,7 @@ struct CategoryBreakdownView: View {
                     ForEach(slices) { slice in
                         Rectangle().fill(Theme.color(for: slice.category))
                             .frame(width: max(2, proxy.size.width * CGFloat(slice.size) / CGFloat(max(total, 1)) - 2))
-                            .help("\(slice.category.name): \(slice.size.bytesText)")
+                            .help("\(slice.category.name): \(slice.size.formattedBytes)")
                     }
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 4))
@@ -228,7 +228,7 @@ struct CategoryBreakdownView: View {
                     Image(systemName: slice.category.symbol).frame(width: 18).foregroundStyle(Theme.color(for: slice.category))
                     Text(slice.category.name)
                     Spacer()
-                    Text(slice.size.bytesText).monospacedDigit().foregroundStyle(.secondary)
+                    Text(slice.size.formattedBytes).monospacedDigit().foregroundStyle(.secondary)
                 }
                 .font(.callout)
                 .help(
@@ -287,22 +287,18 @@ struct ItemRow: View {
                 Text(item.name).lineLimit(1).truncationMode(.middle)
                 if let rule { SafetyBadge(level: rule.safety.level, compact: true) }
                 Spacer()
-                Text(item.size.bytesText).monospacedDigit().foregroundStyle(.secondary)
+                Text(item.size.formattedBytes).monospacedDigit().foregroundStyle(.secondary)
             }
             GeometryReader { proxy in
                 Capsule().fill(color.opacity(0.85)).frame(width: max(3, proxy.size.width * fraction))
             }
             .frame(height: 4)
-            if let rule {
-                Text(rule.name).font(.caption).foregroundStyle(.secondary)
-            } else if let directory = item.directory {
-                if directory.flags.contains(.unreadable) {
-                    Text("No access — needs Full Disk Access").font(.caption).foregroundStyle(Theme.warning)
-                } else if directory.flags.contains(.firmlinkDuplicate) {
-                    Text("Same folder as /\(directory.name), counted there").font(.caption).foregroundStyle(.secondary)
-                } else if directory.flags.contains(.otherVolume) {
-                    Text("Another volume").font(.caption).foregroundStyle(.secondary)
-                }
+            switch item.note(rule: rule) {
+            case .rule(let rule): Text(rule.name).font(.caption).foregroundStyle(.secondary)
+            case .noAccess: Text("No access — needs Full Disk Access").font(.caption).foregroundStyle(Theme.warning)
+            case .sameAs(let name): Text("Same folder as /\(name), counted there").font(.caption).foregroundStyle(.secondary)
+            case .otherVolume: Text("Another volume").font(.caption).foregroundStyle(.secondary)
+            case nil: EmptyView()
             }
         }
         .padding(.vertical, 2)
@@ -328,7 +324,7 @@ struct SelectionInspector: View {
             HStack(alignment: .firstTextBaseline) {
                 Text(item.name).font(.headline).lineLimit(2)
                 Spacer()
-                Text(item.size.bytesText).font(.title3.weight(.semibold)).monospacedDigit()
+                Text(item.size.formattedBytes).font(.title3.weight(.semibold)).monospacedDigit()
             }
             if let path = item.path {
                 Text(PathUtil.abbreviate(path)).font(.caption).foregroundStyle(.secondary).textSelection(.enabled).lineLimit(2)
@@ -350,7 +346,7 @@ struct SelectionInspector: View {
                     Text("\(directory.fileCount.formatted()) files").foregroundStyle(.secondary)
                 }
                 if let modified = item.modified {
-                    Text("Modified \(modified.shortRelative)").foregroundStyle(.secondary)
+                    Text("Modified \(modified.relativeDescription())").foregroundStyle(.secondary)
                 }
             }
             .font(.caption)
@@ -360,7 +356,7 @@ struct SelectionInspector: View {
                     Button("Add to List", systemImage: "plus.circle") { model.addToCleanupList([cleanup]) }
                         .disabled(model.isInCleanupList(item.path))
                     Button("Move to Trash…", systemImage: "trash", role: .destructive) {
-                        model.review(CleanupPlan(items: [cleanup], useTrash: true), title: "Remove \(item.name)")
+                        model.review(model.manualPlan([cleanup]), title: "Remove \(item.name)")
                     }
                 }
             }
@@ -379,15 +375,15 @@ struct ScanningView: View {
 
     var body: some View {
         HStack(spacing: 32) {
-            if let root = model.liveRoot {
-                LiveScanMap(root: root).frame(width: 320, height: 320)
+            if let scan = model.scanProgress {
+                LiveScanMap(progress: scan).frame(width: 320, height: 320)
             }
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
                     Text("Scanning \(PathUtil.abbreviate(model.scanPath))…").font(.title3.weight(.semibold))
                 }
-                Text(progress.bytes.bytesText).font(.system(size: 40, weight: .semibold)).monospacedDigit().contentTransition(
+                Text(progress.bytes.formattedBytes).font(.system(size: 40, weight: .semibold)).monospacedDigit().contentTransition(
                     .numericText())
                 Text("\(progress.files.formatted()) files · \(progress.directories.formatted()) folders").foregroundStyle(.secondary)
                     .monospacedDigit()
@@ -395,9 +391,9 @@ struct ScanningView: View {
                     .middle
                 )
                 .frame(maxWidth: 420, alignment: .leading)
-                if let root = model.liveRoot, root.isListed {
+                let listed = model.liveChildren.filter(\.isListed)
+                if !listed.isEmpty {
                     VStack(alignment: .leading, spacing: 6) {
-                        let listed = root.children.filter(\.isListed)
                         let colorIndex = Dictionary(uniqueKeysWithValues: listed.enumerated().map { ($0.element.address, $0.offset) })
                         let children = listed.sorted { $0.liveSize > $1.liveSize }.prefix(6)
                         ForEach(children, id: \.address) { child in
@@ -405,7 +401,7 @@ struct ScanningView: View {
                                 Circle().fill(Theme.categorical(colorIndex[child.address] ?? 99)).frame(width: 8, height: 8)
                                 Text(child.name)
                                 Spacer()
-                                Text(child.liveSize.bytesText).monospacedDigit().foregroundStyle(.secondary)
+                                Text(child.liveSize.formattedBytes).monospacedDigit().foregroundStyle(.secondary)
                             }
                             .font(.callout)
                         }

@@ -32,7 +32,8 @@ public struct Scanner: Sendable {
         let clock = ContinuousClock.now
         var resolved: [String] = []
         for path in paths {
-            let expanded = PathUtil.expand(path)
+            // Exactly as given: `report ` and `report` are different folders.
+            let expanded = PathUtil.expandArgument(path)
             guard let real = PathUtil.realpath(expanded) else { throw ScanError.notFound(expanded) }
             var isDirectory: ObjCBool = false
             guard FileManager.default.fileExists(atPath: real, isDirectory: &isDirectory), isDirectory.boolValue else {
@@ -58,28 +59,26 @@ public struct Scanner: Sendable {
             let rootNodes = resolved.map { DirNode(name: $0, parent: root) }
             root.children = rootNodes
             root.listed.store(true, ordering: .releasing)
+            progress.rootChildren.withLock { $0 = rootNodes }
             job.seed(zip(rootNodes, resolved).map { job.makeRootItem(node: $0.0, path: $0.1) })
         }
         progress.root.withLock { $0 = root }
 
         job.run()
+        let hardLinks = job.resolveHardLinks()
         Scanner.aggregate(root)
 
-        let elapsed = ContinuousClock.now - clock
         let snapshot = progress.snapshot
         let stats = ScanStats(
             files: snapshot.files,
             directories: snapshot.directories,
-            bytes: root.size,
             errors: snapshot.errors,
-            duration: Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18,
-            startedAt: started,
-            cancelled: progress.isCancelled,
-            unreadable: job.unreadable.withLock { $0 }
+            duration: (ContinuousClock.now - clock) / .seconds(1),
+            cancelled: progress.isCancelled
         )
         return ScanTree(
-            root: root, roots: resolved, stats: stats, options: options,
-            capacity: VolumeCapacity.of(path: resolved[0])
+            root: root, roots: resolved, stats: stats, started: started, options: options,
+            capacity: VolumeCapacity.of(path: resolved[0]), hardLinks: hardLinks
         )
     }
 
@@ -152,9 +151,15 @@ private struct WorkItem {
     let anchors: [DirNode]
 }
 
-private struct HardLinkKey: Hashable {
-    let device: Int32
-    let inode: UInt64
+/// One multiply-linked file. During the scan its bytes go to the first link a worker reaches, so live totals
+/// stay right; afterwards they move to the link `HardLinkGroup.precedes` puts first, so the same disk always
+/// gives the same tree whatever the thread timing.
+private struct HardLinkEntry {
+    let size: UInt64
+    let modified: Int64
+    let credited: DirNode
+    let creditedName: String
+    var links: [HardLink]
 }
 
 private final class ScanJob: @unchecked Sendable {
@@ -167,8 +172,7 @@ private final class ScanJob: @unchecked Sendable {
     /// Exact paths to skip, with the reason flag.
     let skipPaths: [String: DirNode.Flags]
     let excludeGlobs: [String]
-    let hardLinks = Mutex<Set<HardLinkKey>>([])
-    let unreadable = Mutex<[String]>([])
+    let hardLinks = Mutex<[HardLinkKey: HardLinkEntry]>([:])
 
     private let condition = NSCondition()
     private var stack: [WorkItem] = []
@@ -179,24 +183,15 @@ private final class ScanJob: @unchecked Sendable {
         self.options = options
         self.progress = progress
 
+        let rootDevices = Set(
+            roots.compactMap { root -> dev_t? in
+                var st = stat()
+                return lstat(root, &st) == 0 ? st.st_dev : nil
+            })
         switch options.boundary {
-        case .device:
-            var devices = Set<dev_t>()
-            for root in roots {
-                var st = stat()
-                if lstat(root, &st) == 0 { devices.insert(st.st_dev) }
-            }
-            allowedDevices = devices
-        case .container:
-            var devices = Set<dev_t>()
-            for root in roots {
-                devices.formUnion(volumes.containerDevices(for: root))
-                var st = stat()
-                if lstat(root, &st) == 0 { devices.insert(st.st_dev) }
-            }
-            allowedDevices = devices
-        case .unrestricted:
-            allowedDevices = nil
+        case .device: allowedDevices = rootDevices
+        case .container: allowedDevices = rootDevices.union(roots.flatMap { volumes.containerDevices(for: $0) })
+        case .unrestricted: allowedDevices = nil
         }
 
         var mounts: [String: dev_t] = [:]
@@ -299,6 +294,62 @@ private final class ScanJob: @unchecked Sendable {
         }
     }
 
+    // MARK: Hard links
+
+    /// Records one link of a multiply-linked file. Returns true if this is the first link seen, which gets
+    /// the bytes for now.
+    private func recordHardLink(_ key: HardLinkKey, node: DirNode, name: String, size: UInt64, modified: Int64) -> Bool {
+        let link = HardLink(node: node, name: name, hasBytes: false)
+        return hardLinks.withLock { table in
+            guard let index = table.index(forKey: key) else {
+                table[key] = HardLinkEntry(size: size, modified: modified, credited: node, creditedName: name, links: [link])
+                return true
+            }
+            table.values[index].links.append(link)
+            return false
+        }
+    }
+
+    /// Moves each multiply-linked file's bytes from the link credited during the scan to its owner, and returns
+    /// the links for the tree to keep. Runs once, single-threaded, after every worker has finished and before
+    /// aggregation.
+    func resolveHardLinks() -> [HardLinkKey: HardLinkGroup] {
+        let table = hardLinks.withLock { table in
+            defer { table = [:] }
+            return table
+        }
+        let minFileSize = options.minFileSize
+        var groups: [HardLinkKey: HardLinkGroup] = [:]
+        groups.reserveCapacity(table.count)
+        // Many links share a folder; building its path once per folder keeps this pass cheap.
+        var folderPaths: [DirNode: String] = [:]
+        func path(of folder: DirNode) -> String {
+            if let known = folderPaths[folder] { return known }
+            let path = folder.path
+            folderPaths[folder] = path
+            return path
+        }
+        for (key, entry) in table {
+            var group = HardLinkGroup(size: entry.size, modified: entry.modified, links: entry.links)
+            guard let ownerIndex = group.ownerIndex(path: path(of:)) else { continue }
+            let owner: HardLink = group.links[ownerIndex]
+            var holder: DirNode = entry.credited
+            var holderName: String = entry.creditedName
+            let moves = owner.node !== holder || owner.name != holderName
+            // The links themselves stay counted where they are; only the bytes (and the tracked leaf) move.
+            if moves && holder.dropLinkBytes(named: holderName, size: entry.size, minFileSize: minFileSize) {
+                owner.node.addLinkBytes(named: owner.name, size: entry.size, modified: entry.modified, minFileSize: minFileSize)
+                holder = owner.node
+                holderName = owner.name
+            }
+            for index in group.links.indices {
+                group.links[index].hasBytes = group.links[index].node === holder && group.links[index].name == holderName
+            }
+            groups[key] = group
+        }
+        return groups
+    }
+
     // MARK: Listing one directory
 
     private func publish(_ node: DirNode) {
@@ -308,9 +359,6 @@ private final class ScanJob: @unchecked Sendable {
     private func markUnreadable(_ item: WorkItem) {
         item.node.flags.insert(.unreadable)
         progress.errors.add(1, ordering: .relaxed)
-        unreadable.withLock { list in
-            if list.count < 500 { list.append(item.path) }
-        }
     }
 
     private func skipFlag(for path: String) -> DirNode.Flags? {
@@ -325,7 +373,6 @@ private final class ScanJob: @unchecked Sendable {
     private func list(_ item: WorkItem, buffer: UnsafeMutableRawPointer, bufferSize: Int) -> [WorkItem] {
         let node = item.node
         if progress.isCancelled {
-            node.flags.insert(.incomplete)
             publish(node)
             return []
         }
@@ -358,7 +405,6 @@ private final class ScanJob: @unchecked Sendable {
         attributes.fileattr = attrgroup_t(ATTR_FILE_LINKCOUNT | ATTR_FILE_ALLOCSIZE)
 
         let minFileSize = options.minFileSize
-        let countHardLinksOnce = options.countHardLinksOnce
         let liveDepth = options.liveDepth
 
         var childNodes: [DirNode] = []
@@ -475,9 +521,11 @@ private final class ScanJob: @unchecked Sendable {
                         allocated = UInt64(max(0, field.loadUnaligned(as: Int64.self)))
                         field += 8
                     }
-                    if countHardLinksOnce, linkCount > 1, objectType == UInt32(VREG.rawValue) {
-                        let key = HardLinkKey(device: device, inode: inode)
-                        let isFirst = hardLinks.withLock { $0.insert(key).inserted }
+                    if linkCount > 1, objectType == UInt32(VREG.rawValue) {
+                        let fileName = String(decoding: UnsafeBufferPointer(start: name, count: nameLength), as: UTF8.self)
+                        let isFirst = recordHardLink(
+                            HardLinkKey(device: device, inode: inode), node: node, name: fileName,
+                            size: allocated, modified: modified)
                         if !isFirst { allocated = 0 }
                     }
                     directBytes &+= allocated
@@ -505,6 +553,7 @@ private final class ScanJob: @unchecked Sendable {
         node.newestModified = newestModified
         node.newestAccessed = newestAccessed
         publish(node)
+        if node.parent == nil { progress.rootChildren.withLock { $0 = childNodes } }
 
         for anchor in item.anchors { anchor.liveBytes.add(directBytes, ordering: .relaxed) }
         progress.files.add(UInt64(directCount), ordering: .relaxed)

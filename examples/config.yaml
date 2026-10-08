@@ -15,15 +15,15 @@ safety:
   trash: always             # always = move to Trash; rules = regenerable caches may be deleted directly
   maxBytesPerRun: 100GB     # an automatic run never removes more than this
   protectedPaths: []        # your own never-touch list, e.g. [~/Work/client-archive]
-  allowedCommands: []       # extra tools rule commands may run (built-ins: brew, docker, xcrun, npm, …)
+  allowedCommands: []       # tools your own rules' commands may run; built-in rules also trust brew, docker, xcrun, npm, …
 
 rules:
   disabled: []              # rule ids to ignore, e.g. [node.node-modules]
   directories: [~/.config/spacekit/rules]   # your own rule files (same format as the built-in library)
 
 automation:
-  notifications: true
-  checkEvery: 1h            # how often the background agent looks for due jobs
+  notifications: true       # for observe and suggest jobs; automatic runs that clean always notify
+  checkEvery: 1h            # how often the background agent looks for due jobs (5m to 24h)
   snapshot: sunday 04:00    # full storage snapshot for History ("what grew?"); or: never
   activeModelWindow: 90d    # AI models used within this window count as active
 

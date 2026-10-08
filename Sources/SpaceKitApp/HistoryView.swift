@@ -8,7 +8,7 @@ struct HistoryView: View {
     @State private var hoveredDate: Date?
 
     private var points: [(date: Date, used: UInt64, total: UInt64)] {
-        model.context.history.dailyUsage(days: days)
+        model.historyStore.dailyUsage(days: days)
     }
 
     var body: some View {
@@ -56,12 +56,12 @@ struct HistoryView: View {
     }
 
     private var deltas: some View {
-        let history = model.context.history
-        let month = history.usedDelta(over: 30 * 86_400)
-        let range = history.usedDelta(over: Double(days) * 86_400)
+        let history = model.historyStore
+        let month = history.usedDelta(over: .days(30))
+        let range = history.usedDelta(over: .days(Double(days)))
         return HStack(spacing: 12) {
             if let last = points.last {
-                StatTile(title: "Used now", value: last.used.bytesText, detail: "of \(last.total.bytesText)", symbol: "internaldrive")
+                StatTile(title: "Used now", value: last.used.formattedBytes, detail: "of \(last.total.formattedBytes)", symbol: "internaldrive")
             }
             if let month {
                 StatTile(
@@ -74,7 +74,7 @@ struct HistoryView: View {
                     symbol: "calendar")
             }
             StatTile(
-                title: "Recovered by SpaceKit", value: model.recovered90Days.bytesText, detail: "last 3 months",
+                title: "Recovered by SpaceKit", value: model.recovered90Days.formattedBytes, detail: "last 3 months",
                 symbol: "arrow.uturn.backward.circle", tint: Theme.good)
         }
     }
@@ -105,7 +105,7 @@ struct HistoryView: View {
                             .foregroundStyle(Theme.mutedInk)
                             .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
                             .annotation(position: .top, alignment: .leading) {
-                                Text("Capacity \(total.bytesText)").font(.caption).foregroundStyle(.secondary)
+                                Text("Capacity \(total.formattedBytes)").font(.caption).foregroundStyle(.secondary)
                             }
                     }
                     if let hoveredDate, let point = nearest(to: hoveredDate) {
@@ -117,7 +117,7 @@ struct HistoryView: View {
                                 VStack(spacing: 2) {
                                     Text(point.date.formatted(date: .abbreviated, time: .omitted)).font(.caption).foregroundStyle(
                                         .secondary)
-                                    Text(point.used.bytesText).font(.callout.weight(.semibold)).monospacedDigit()
+                                    Text(point.used.formattedBytes).font(.callout.weight(.semibold)).monospacedDigit()
                                 }
                                 .padding(6)
                                 .background(.background, in: RoundedRectangle(cornerRadius: 6))
@@ -144,7 +144,7 @@ struct HistoryView: View {
 
     // Growth is polarity, so it uses a diverging pair: warm for grew, cool for shrank. Values are labeled directly.
     private var growthChart: some View {
-        let grew = model.context.history.whatGrew(over: Double(days) * 86_400, limit: 10)
+        let grew = model.historyStore.whatGrew(over: .days(Double(days)), limit: 10)
         return Card {
             VStack(alignment: .leading, spacing: 8) {
                 Text("What grew?").font(.headline)

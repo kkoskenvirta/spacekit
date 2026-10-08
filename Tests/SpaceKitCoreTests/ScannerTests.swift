@@ -46,6 +46,29 @@ struct ScannerTests {
         #expect(result.root.size == tree.allocated("store/blob"))
     }
 
+    @Test("Hard-linked bytes go to the link whose folder sorts first, whatever the thread timing", arguments: [UInt64(0), 2_000_000])
+    func hardLinkAttribution(minFileSize: UInt64) throws {
+        let tree = try TempTree()
+        let original = try tree.file("store/blob", bytes: 1_000_000)
+        for folder in ["z-last", "a-first", "m-middle"] {
+            try tree.directory(folder)
+            try FileManager.default.linkItem(atPath: original, toPath: tree.path("\(folder)/linked"))
+        }
+        for index in 0..<40 { try tree.file("filler/d\(index)/f.bin", bytes: 4_000) }
+        let bytes = tree.allocated("store/blob")
+        for threads in [1, 2, 4, 8, 1, 4, 8] {
+            let result = try scan(tree.root, minFileSize: minFileSize) { $0.threads = threads }
+            #expect(result.node(at: tree.path("a-first"))?.size == bytes, "threads \(threads)")
+            for folder in ["store", "m-middle", "z-last"] {
+                #expect(result.node(at: tree.path(folder))?.size == 0, "\(folder), threads \(threads)")
+                #expect(result.node(at: tree.path(folder))?.directFileCount == 1)
+            }
+            let first = try #require(result.node(at: tree.path("a-first")))
+            #expect(first.files.map(\.name) == (minFileSize == 0 ? ["linked"] : []))
+            #expect(result.inconsistencies().isEmpty, "\(result.inconsistencies())")
+        }
+    }
+
     @Test("Symlinks are not followed")
     func symlinks() throws {
         let tree = try TempTree()
@@ -176,5 +199,41 @@ struct LayoutTests {
         #expect(abs(sweep - 2 * .pi) < 0.001)
         let hit = Sunburst.hitTest(arcs, at: CGPoint(x: 100, y: 40), center: CGPoint(x: 100, y: 100), innerRadius: 20, ringWidth: 30)
         #expect(hit?.ring == 2)
+    }
+
+    @Test("Items too small to see merge into one remainder in both layouts")
+    func remainders() throws {
+        let tree = try TempTree()
+        try tree.file("big.bin", bytes: 4_000_000)
+        for index in 0..<30 { try tree.file("d\(index)/tiny.bin", bytes: 4_000) }
+        let result = try scan(tree.root)
+        let arcs = Sunburst.layout(result.root, minSweep: 0.05).filter { $0.ring == 1 }
+        guard case .remainder(_, let count, _) = arcs.last?.item else {
+            Issue.record("no remainder arc")
+            return
+        }
+        #expect(count == 30)
+        #expect(arcs.count == 2)
+        let cells = Treemap.visibleItems(of: result.root, area: 10_000, minCellArea: 100)
+        #expect(cells.count == 2)
+        #expect(cells.last?.name == "30 more items")
+    }
+}
+
+@Suite("Live scan view")
+struct LiveScanTests {
+    @Test("The root's subfolders are available to live readers without touching the tree being finalized")
+    func liveChildren() throws {
+        let tree = try TempTree()
+        try tree.file("a/x.bin", bytes: 10_000)
+        try tree.file("b/y.bin", bytes: 20_000)
+        let progress = ScanProgress()
+        let result = try Scanner().scan(tree.root, progress: progress)
+        #expect(Set(progress.liveChildren.map(\.name)) == ["a", "b"])
+        #expect(Set(progress.liveChildren.map(ObjectIdentifier.init)) == Set(result.root.children.map(ObjectIdentifier.init)))
+
+        let multi = ScanProgress()
+        _ = try Scanner().scan(roots: [tree.path("a"), tree.path("b")], progress: multi)
+        #expect(multi.liveChildren.map(\.name) == [tree.path("a"), tree.path("b")])
     }
 }

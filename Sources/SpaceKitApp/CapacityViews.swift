@@ -16,13 +16,13 @@ struct CapacitySummary: View {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 if showsName { Text(capacity.name).font(compact ? .caption.weight(.semibold) : .headline) }
                 if showsName { Spacer() }
-                Text("\(capacity.available.bytesText) available")
+                Text("\(capacity.available.formattedBytes) available")
                     .font(compact ? .caption.weight(showsName ? .regular : .semibold) : .callout.weight(.semibold))
                     .foregroundStyle(showsName ? .secondary : .primary)
                     .monospacedDigit()
                     .contentTransition(.numericText())
                 if !showsName {
-                    Text("of \(capacity.total.bytesText)").font(.caption).foregroundStyle(.secondary)
+                    Text("of \(capacity.total.formattedBytes)").font(.caption).foregroundStyle(.secondary)
                 }
             }
             CapacityBar(capacity: capacity, height: compact ? 5 : 6)
@@ -48,9 +48,9 @@ struct CapacitySummary: View {
     }
 
     private var detailLine: String {
-        var parts: [String] = ["\(capacity.freeNow.bytesText) free now"]
-        if capacity.purgeable > 0 { parts.append("\(capacity.purgeable.bytesText) purgeable") }
-        if let trash = model.trashBytes, trash > 1_000_000_000 { parts.append("\(trash.bytesText) in Trash") }
+        var parts: [String] = ["\(capacity.freeNow.formattedBytes) free now"]
+        if capacity.purgeable > 0 { parts.append("\(capacity.purgeable.formattedBytes) purgeable") }
+        if let trash = model.trashBytes, trash > 1_000_000_000 { parts.append("\(trash.formattedBytes) in Trash") }
         return parts.joined(separator: " · ")
     }
 }
@@ -65,11 +65,11 @@ struct CapacityDetails: View {
         VStack(alignment: .leading, spacing: 12) {
             Text(capacity.name).font(.headline)
             Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
-                row("Available (as Finder shows it)", capacity.available.bytesText, bold: true)
-                row("Free right now", capacity.freeNow.bytesText)
-                row("Purgeable", capacity.purgeable.bytesText)
-                row("Used", "\(capacity.used.bytesText) of \(capacity.total.bytesText)")
-                if let trash = model.trashBytes { row("In the Trash", trash.bytesText) }
+                row("Available (as Finder shows it)", capacity.available.formattedBytes, bold: true)
+                row("Free right now", capacity.freeNow.formattedBytes)
+                row("Purgeable", capacity.purgeable.formattedBytes)
+                row("Used", "\(capacity.used.formattedBytes) of \(capacity.total.formattedBytes)")
+                if let trash = model.trashBytes { row("In the Trash", trash.formattedBytes) }
             }
             .font(.callout)
 

@@ -30,16 +30,10 @@ public enum Sunburst {
             let sweep = end - start
             let radiansPerByte = sweep / Double(node.size)
             var angle = start
-            var restSize: UInt64 = 0
-            var restCount = 0
-            var index = 0
-            for item in node.items {
+            // Integer sizes: size >= ceil(x) exactly when size * radiansPerByte >= minSweep.
+            let (visible, restCount, restSize) = Treemap.split(node.items, minBytes: UInt64((minSweep / radiansPerByte).rounded(.up)))
+            for (index, item) in visible.enumerated() {
                 let itemSweep = Double(item.size) * radiansPerByte
-                guard itemSweep >= minSweep else {
-                    restSize += item.size
-                    restCount += 1
-                    continue
-                }
                 let arcBranch = ring == 1 ? index : branch
                 let arc = SunburstArc(item: .item(item), ring: ring, startAngle: angle, endAngle: angle + itemSweep, branch: arcBranch)
                 arcs.append(arc)
@@ -47,7 +41,6 @@ public enum Sunburst {
                     queue.append((child, angle, angle + itemSweep, ring + 1, arcBranch))
                 }
                 angle += itemSweep
-                index += 1
             }
             if restCount > 0, restSize > 0 {
                 let restSweep = Double(restSize) * radiansPerByte
@@ -56,7 +49,7 @@ public enum Sunburst {
                         SunburstArc(
                             item: .remainder(parent: node, count: restCount, size: restSize),
                             ring: ring, startAngle: angle, endAngle: angle + restSweep,
-                            branch: ring == 1 ? index : branch))
+                            branch: ring == 1 ? visible.count : branch))
                 }
             }
         }

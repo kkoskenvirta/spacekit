@@ -50,7 +50,11 @@ struct SpaceKitApp: App {
     }
 }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// The app's model, so quitting can wait for a cleanup in progress.
+    static weak var model: AppModel?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // When launched from `swift run` (no bundle), become a regular foreground app with a Dock icon.
         NSApp.setActivationPolicy(.regular)
@@ -58,6 +62,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    /// Quitting mid-cleanup would stop between two removals, so it waits until the cleanup finishes.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let model = AppDelegate.model, model.isCleaning else { return .terminateNow }
+        let alert = NSAlert()
+        alert.messageText = "A cleanup is still running"
+        alert.informativeText = "SpaceKit can quit as soon as it finishes. Every removal is journaled as it happens."
+        alert.addButton(withTitle: "Quit When Finished")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return .terminateCancel }
+        // The cleanup may have finished while the alert was open.
+        guard model.isCleaning else { return .terminateNow }
+        model.quitWhenCleanupsAreDone()
+        return .terminateLater
+    }
 }
 
 struct RootView: View {
@@ -69,17 +88,20 @@ struct RootView: View {
             SidebarView()
                 .navigationSplitViewColumnWidth(min: 220, ideal: 240, max: 300)
         } detail: {
-            Group {
-                switch model.section {
-                case .explore: ExploreView()
-                case .dev: DevIntelligenceView()
-                case .ai: AIView()
-                case .automation: AutomationView()
-                case .history: HistoryView()
-                case .rules: RulesView()
+            VStack(spacing: 0) {
+                if let error = model.configError { ConfigErrorBanner(error: error) }
+                Group {
+                    switch model.section {
+                    case .explore: ExploreView()
+                    case .dev: DevIntelligenceView()
+                    case .ai: AIView()
+                    case .automation: AutomationView()
+                    case .history: HistoryView()
+                    case .rules: RulesView()
+                    }
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .sheet(item: $model.pendingCleanup) { pending in
             CleanupSheet(pending: pending)
@@ -104,6 +126,29 @@ struct RootView: View {
             #endif
             if model.tree == nil && !model.showOnboarding { model.scan() }
         }
+    }
+}
+
+/// Stays above every section while the config file is invalid: cleaning is refused until it's fixed, and
+/// nothing else on screen would say why.
+struct ConfigErrorBanner: View {
+    @Environment(AppModel.self) private var model
+    let error: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Image(systemName: "xmark.octagon.fill").foregroundStyle(Theme.critical)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("The config file is invalid, so SpaceKit won't clean anything.").font(.callout.weight(.semibold))
+                Text(error).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                Text("Fix it (spacekit config validate shows the problem), then Reload.").font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Open Config") { model.openConfigInEditor() }
+            Button("Reload") { model.reloadContext() }
+        }
+        .padding(10)
+        .background(Theme.critical.opacity(0.12))
     }
 }
 
@@ -142,7 +187,7 @@ struct SidebarView: View {
                             Image(systemName: "trash")
                             VStack(alignment: .leading) {
                                 Text("Trash").font(.caption.weight(.semibold))
-                                Text("\(trash.bytesText) still on disk").font(.caption2).foregroundStyle(.secondary)
+                                Text("\(trash.formattedBytes) still on disk").font(.caption2).foregroundStyle(.secondary)
                             }
                             Spacer()
                             Text("Empty…").font(.caption)
@@ -166,7 +211,7 @@ struct SidebarView: View {
         case .dev:
             guard let analysis = model.analysis else { return nil }
             let safe = analysis.total(.safe)
-            return safe > 0 ? Text(safe.bytesText) : nil
+            return safe > 0 ? Text(safe.formattedBytes) : nil
         case .automation:
             return model.suggestions.isEmpty ? nil : Text("\(model.suggestions.count)")
         default:
@@ -188,7 +233,7 @@ struct CleanupListButton: View {
                 Image(systemName: "tray.full")
                 VStack(alignment: .leading) {
                     Text("Cleanup List").font(.caption.weight(.semibold))
-                    Text("\(model.cleanupList.count) items · \(model.cleanupListBytes.bytesText)").font(.caption2).foregroundStyle(
+                    Text("\(model.cleanupList.count) items · \(model.cleanupListBytes.formattedBytes)").font(.caption2).foregroundStyle(
                         .secondary)
                 }
                 Spacer()
@@ -219,7 +264,7 @@ struct CleanupListPopover: View {
                                 .middle)
                         }
                         Spacer()
-                        Text(item.size.bytesText).monospacedDigit().foregroundStyle(.secondary)
+                        Text(item.size.formattedBytes).monospacedDigit().foregroundStyle(.secondary)
                         Button {
                             model.cleanupList.removeAll { $0.id == item.id }
                         } label: {
@@ -238,8 +283,8 @@ struct CleanupListPopover: View {
                 }
                 .disabled(!model.cleanupList.contains { $0.kind == .directory })
                 Spacer()
-                Button("Review & Clean \(model.cleanupListBytes.bytesText)") {
-                    model.review(CleanupPlan(items: model.cleanupList, useTrash: true), title: "Clean \(model.cleanupList.count) items")
+                Button("Review & Clean \(model.cleanupListBytes.formattedBytes)") {
+                    model.review(model.manualPlan(model.cleanupList), title: "Clean \(model.cleanupList.count) items")
                     dismiss()
                 }
                 .buttonStyle(.borderedProminent)
@@ -258,14 +303,14 @@ struct MenuBarContent: View {
         VStack(alignment: .leading, spacing: 12) {
             if let capacity = model.bootVolume {
                 CapacitySummary(capacity: capacity, showsName: true)
-                Text("\(capacity.used.bytesText) of \(capacity.total.bytesText) used").font(.caption).foregroundStyle(.secondary)
+                Text("\(capacity.used.formattedBytes) of \(capacity.total.formattedBytes) used").font(.caption).foregroundStyle(.secondary)
             }
             Divider()
-            if let next = model.nextRuns().first {
-                Label("Next: \(next.job.name), \(next.date.shortRelative)", systemImage: "clock").font(.callout)
+            if let next = model.jobRunner.nextRuns().first {
+                Label("Next: \(next.job.name), \(next.date.relativeDescription())", systemImage: "clock").font(.callout)
             }
             if model.recovered90Days > 0 {
-                Label("Recovered \(model.recovered90Days.bytesText) in 3 months", systemImage: "arrow.uturn.backward.circle").font(.callout)
+                Label("Recovered \(model.recovered90Days.formattedBytes) in 3 months", systemImage: "arrow.uturn.backward.circle").font(.callout)
             }
             if !model.suggestions.isEmpty {
                 Button {
