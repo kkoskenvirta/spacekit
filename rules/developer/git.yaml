@@ -6,10 +6,10 @@ category: developer.worktrees
 rules:
   - id: git.unused-worktrees
     name: Unused git worktrees
-    description: Worktrees made with git worktree add whose repository is gone or no longer lists them, or where nothing changed and git recorded nothing for 30 days. Removing one loses its uncommitted changes; its commits and branch stay in the repository, which lists the worktree as prunable until git worktree prune.
+    description: Worktrees made with git worktree add whose repository is gone or no longer lists them, or where nothing changed and git recorded nothing for 7 days. Removing one loses its uncommitted changes; its commits and branch stay in the repository, which lists the worktree as prunable until git worktree prune.
     match:
       worktrees:
-        idleFor: 30d
+        idleFor: 7d
     recreatedBy: git worktree add
     safety: review
     policy:
