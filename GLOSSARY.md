@@ -36,6 +36,8 @@
 
 **Local Docker endpoint**: a Docker context whose endpoint is a unix socket on this Mac (Docker Desktop, OrbStack, Colima); `docker` rule commands run only against one, and `docker builder` commands only when the selected buildx builder is a `docker` or `docker-container` builder on one, or no buildx plugin is installed, so the classic builder prunes that daemon. _Avoid_: local daemon.
 
+**Unused worktree**: a linked git worktree (`GitWorktree`) that is orphaned, because the folder its `.git` file names is gone, or idle, because nothing changed in it and git recorded nothing for it for the rule's `match.worktrees.idleFor`; the only kind of worktree a worktree rule matches. _Avoid_: stale worktree, dead worktree.
+
 ## Runs
 
 **Manual run**: a cleanup a person reviews and starts by hand from the app, the TUI or the CLI. _Avoid_: interactive run.

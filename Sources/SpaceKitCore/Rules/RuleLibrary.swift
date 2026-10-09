@@ -261,8 +261,14 @@ public struct RuleLibrary: Sendable {
         if rule.paths.isEmpty && rule.match == nil {
             issue(.error, "needs either `path` or `match`")
         }
-        if let match = rule.match, match.names.isEmpty {
+        if let match = rule.match, match.names.isEmpty, match.worktrees == nil {
             issue(.error, "`match.names` is empty")
+        }
+        if let match = rule.match, !match.names.isEmpty, match.worktrees != nil {
+            issue(.error, "`match.worktrees` matches worktrees whatever their names; leave out `match.names`")
+        }
+        if rule.match?.worktrees != nil && rule.safety.level == .protected {
+            issue(.error, "protected rules guard paths and names; `match.worktrees` can't protect anything")
         }
         for path in rule.paths {
             if !path.hasPrefix("/") && !path.hasPrefix("~") {

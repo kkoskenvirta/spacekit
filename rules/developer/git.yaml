@@ -1,0 +1,19 @@
+# Git: linked worktrees nobody uses any more.
+# Schema: docs/RULES.md
+group: Git
+category: developer.worktrees
+
+rules:
+  - id: git.unused-worktrees
+    name: Unused git worktrees
+    description: Worktrees made with git worktree add whose repository is gone or no longer lists them, or where nothing changed and git recorded nothing for 7 days. Removing one loses its uncommitted changes; its commits and branch stay in the repository, which lists the worktree as prunable until git worktree prune.
+    match:
+      worktrees:
+        idleFor: 7d
+    recreatedBy: git worktree add
+    safety: review
+    policy:
+      schedule: weekly
+      mode: suggest
+    action: remove
+    docs: https://git-scm.com/docs/git-worktree

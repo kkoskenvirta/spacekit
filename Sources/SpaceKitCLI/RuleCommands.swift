@@ -32,8 +32,10 @@ struct RulesCommand: ParsableCommand {
                     print()
                     print(Output.safe(group).bold)
                 }
-                let location = Output.safe(
-                    rule.paths.first.map { PathUtil.abbreviate($0) } ?? rule.match.map { "**/" + $0.names.joined(separator: ", ") } ?? "")
+                let pattern = rule.match.map { match in
+                    match.worktrees.map { "**/ git worktrees idle \($0.idleFor)+" } ?? "**/" + match.names.joined(separator: ", ")
+                }
+                let location = Output.safe(rule.paths.first.map { PathUtil.abbreviate($0) } ?? pattern ?? "")
                 print(
                     "  " + "●".fg(ANSI.color(for: rule.safety.level)) + " " + ANSI.pad(Output.safe(rule.id), to: 36)
                         + ANSI.pad(ANSI.truncate(Output.safe(rule.name), to: 30), to: 32) + location.dim)

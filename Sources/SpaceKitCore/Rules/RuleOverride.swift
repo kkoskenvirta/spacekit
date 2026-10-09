@@ -49,6 +49,14 @@ extension RuleLibrary {
             for glob in original.exclude where !pattern.exclude.contains(glob) {
                 problems.append("drops '\(glob)' from its pattern's exclude")
             }
+            switch (original.worktrees, pattern.worktrees) {
+            case (nil, .some):
+                problems.append("adds worktree matching (match.worktrees)")
+            case (.some(let originalWorktrees), .some(let worktrees)) where worktrees.idleFor < originalWorktrees.idleFor:
+                problems.append("lowers match.worktrees.idleFor below \(originalWorktrees.idleFor)")
+            default:
+                break
+            }
         default:
             break
         }

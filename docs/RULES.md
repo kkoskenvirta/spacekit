@@ -81,6 +81,21 @@ Matching stops at the first match, so nested `node_modules` inside a matched one
 
 For project artifacts, *last used* is the project's activity (the newest change anywhere in the project except the artifact itself), because package managers reset file dates inside `node_modules` and friends.
 
+To find unused git worktrees, whatever their folder names, write `worktrees` instead of `names`:
+
+```yaml
+match:
+  worktrees:
+    idleFor: 7d                # unused once nothing changed in it, and git recorded nothing for it, this long
+```
+
+A worktree is a folder whose `.git` is a file naming a folder in a repository's `.git/worktrees/`, as `git worktree add` leaves it. A submodule's `.git` file names `.git/modules/` instead, so submodules don't match. A worktree matches when it is orphaned or idle:
+
+- **Orphaned:** the folder its `.git` file names is gone, because the repository was deleted or moved, or `git worktree prune` dropped it. Git can't use the worktree any more.
+- **Idle:** nothing changed inside the worktree, and git recorded nothing for it, for `idleFor`. Git's record of a worktree is its index, `HEAD` and reflog in the repository, which commits and checkouts update.
+
+A worktree in use doesn't match, so the search goes on into it, and its `node_modules` stays with its own rule. An unused worktree is one item with everything inside it, so a `node_modules` rule or job no longer counts or cleans the `node_modules` inside it. A worktree whose repository can't be reached, because its volume isn't mounted or a folder can't be read, isn't orphaned and doesn't match. `idleFor` is at least a day, and an override may raise it but not lower it. The built-in rule `git.unused-worktrees` uses 7 days: to wait longer, override it with a higher `idleFor`; to list worktrees sooner, add a rule of your own with its own id and a shorter `idleFor`. A worktree is a repository, so removing one always needs confirmation and automatic jobs never remove one.
+
 ### `action`
 
 ```yaml

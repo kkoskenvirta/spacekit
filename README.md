@@ -7,11 +7,11 @@
 SpaceKit is an open-source disk space tool for developers: a native macOS app, a terminal UI and a scriptable CLI, built on one fast engine and one YAML configuration. It maps the whole disk, hidden folders included. It recognises what developer and AI tools leave behind, tells you what is actually safe to remove, and cleans it up on a schedule within strict safety limits.
 
 - **🔭 Explore: where is my disk going?** An interactive sector map (sunburst) or treemap of the whole disk, colored by folder, kind, safety or age. Zoom into any sector; every folder SpaceKit recognises is labelled ("DerivedData · 🟢 Regenerable").
-- **🧠 Dev Intelligence: what is actually safe to remove?** Xcode, SwiftPM, CocoaPods, Node, pnpm, Bun, Python, Rust, Go, Gradle, Android, Flutter, Docker, Homebrew, editors and more, sorted into 🟢 regenerable, 🟡 review and 🔴 don't-touch, each with *what it is*, *risk*, *recreated by* and *last used*.
+- **🧠 Dev Intelligence: what is actually safe to remove?** Xcode, SwiftPM, CocoaPods, Node, pnpm, Bun, Python, Rust, Go, Gradle, Android, Flutter, Docker, Homebrew, editors, unused git worktrees and more, sorted into 🟢 regenerable, 🟡 review and 🔴 don't-touch, each with *what it is*, *risk*, *recreated by* and *last used*.
 - **🤖 AI Development.** Ollama, Hugging Face, LM Studio, PyTorch, Whisper and AI coding tools: what you actively use, what's been idle for 90+ days, and what's potentially reclaimable.
 - **⏱ Automation.** Jobs that **observe**, **suggest** or **clean automatically** on a schedule ("clean DerivedData when > 30 GB, keep projects used within 14 days"), run by a lightweight per-user background agent. Never silent: you're notified, and everything is journaled.
 - **📈 Storage History.** Used space over time, "+73 GB this month", and **what grew**.
-- **📚 Storage Rules.** 170 community rules in plain YAML. Add your own in minutes.
+- **📚 Storage Rules.** 171 community rules in plain YAML. Add your own in minutes.
 
 ## Safety
 
