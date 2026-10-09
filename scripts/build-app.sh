@@ -12,6 +12,12 @@ VERSION="${VERSION:-$(grep -m1 'static let version' Sources/SpaceKitCLI/SpaceKit
 CONFIGURATION="${CONFIGURATION:-release}"
 APP="$ROOT/build/SpaceKit.app"
 SIGN_IDENTITY="${SIGN_IDENTITY:--}"
+if [ -z "${SDKROOT:-}" ]; then
+  SDKROOT="$(scripts/swift-sdk.sh)"
+fi
+if [ -n "$SDKROOT" ]; then
+  export SDKROOT
+fi
 
 echo "→ Building SpaceKit $VERSION ($CONFIGURATION)"
 swift build -c "$CONFIGURATION" --product SpaceKitApp

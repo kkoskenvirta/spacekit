@@ -19,7 +19,7 @@ swift run spacekit --help
 
 ### Running the tests
 
-`make test` runs `swift test`. The test suite (Swift Testing) and the SwiftUI app target need a full Xcode; with only the Command Line Tools, `swift build --product spacekit` still builds the core, the TUI and the CLI. CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) builds everything, runs the tests, validates the rules and bundles the app on macOS 15. It is the source of truth for the app target, so a change to `Sources/SpaceKitApp` isn't verified until CI passes.
+`make test` runs `swift test`. With only the Command Line Tools, plain `swift build` and `swift test` miss two macro plugins. The macOS 27 SDK's SwiftUI `@State` needs a plugin that ships only with Xcode, so `make` and `scripts/build-app.sh` build with the newest installed SDK that compiles it ([`scripts/swift-sdk.sh`](scripts/swift-sdk.sh)). The Swift Testing plugin ships with the Command Line Tools, but SwiftPM doesn't load it, so `make` passes its path to the compiler. Use the `make` targets, or copy the flags from the [`Makefile`](Makefile). CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) builds everything, runs the tests, validates the rules and bundles the app on macOS 15. It is the source of truth for the app target, so a change to `Sources/SpaceKitApp` isn't verified until CI passes.
 
 ### A sandbox for manual testing
 

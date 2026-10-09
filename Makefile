@@ -4,6 +4,19 @@ PREFIX ?= $(HOME)/.local
 BINDIR := $(PREFIX)/bin
 SHAREDIR := $(PREFIX)/share/spacekit
 SWIFT ?= swift
+# The Command Line Tools lack two macro plugins SwiftPM gets from Xcode. SwiftUI's is avoided by building with
+# an older SDK (scripts/swift-sdk.sh). Swift Testing's ships with them but SwiftPM doesn't load it, so it's
+# passed by path.
+DEVELOPER_DIR_PATH := $(shell xcode-select -p)
+ifneq ($(findstring /CommandLineTools,$(DEVELOPER_DIR_PATH)),)
+ifeq ($(origin SDKROOT),undefined)
+SDKROOT := $(shell scripts/swift-sdk.sh)
+endif
+SWIFT_FLAGS += -Xswiftc -plugin-path -Xswiftc $(DEVELOPER_DIR_PATH)/usr/lib/swift/host/plugins/testing
+endif
+ifneq ($(SDKROOT),)
+export SDKROOT
+endif
 # The background agent's plist. `make uninstall` reads it to see which executable the agent runs.
 AGENT_PLIST ?= $(HOME)/Library/LaunchAgents/dev.spacekit.agent.plist
 
@@ -13,22 +26,22 @@ help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 
 build: ## Debug build of everything
-	$(SWIFT) build
+	$(SWIFT) build $(SWIFT_FLAGS)
 
 release: ## Optimised build of the CLI and app
 	$(SWIFT) build -c release
 
 test: ## Run the test suite (includes the safety guarantees)
-	$(SWIFT) test
+	$(SWIFT) test $(SWIFT_FLAGS)
 
 app: ## Build build/SpaceKit.app (release, ad-hoc signed)
 	scripts/build-app.sh
 
 run: ## Run the app from source
-	$(SWIFT) run SpaceKitApp
+	$(SWIFT) run $(SWIFT_FLAGS) SpaceKitApp
 
 tui: ## Run the terminal UI from source on your home folder
-	$(SWIFT) run spacekit tui ~
+	$(SWIFT) run $(SWIFT_FLAGS) spacekit tui ~
 
 install: release ## Install the CLI to $(BINDIR) (the built-in rules are compiled into it)
 	@mkdir -p "$(BINDIR)"
@@ -49,7 +62,7 @@ uninstall: ## Stop the background agent if it runs this CLI, remove the installe
 	rm -rf "$(SHAREDIR)"
 
 validate-rules: build ## Validate every built-in rule (rebuilt from rules/) and your own
-	$(SWIFT) run spacekit rules validate
+	$(SWIFT) run $(SWIFT_FLAGS) spacekit rules validate
 
 lint: ## Check formatting with swift-format
 	swift-format lint --recursive --strict Sources Tests
