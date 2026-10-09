@@ -281,11 +281,13 @@ public struct RuleEngine: Sendable {
         guard !patternRules.isEmpty else { return [] }
 
         var byName: [String: [(Int, Rule, [String])]] = [:]
+        var worktreeRules: [(Int, Rule, [String])] = []
         var allRoots = Set<String>()
         for (index, rule) in patternRules {
             let roots = (rule.match!.roots ?? devRoots).map { PathUtil.expand($0) }
             allRoots.formUnion(roots)
             for name in rule.match!.names { byName[name, default: []].append((index, rule, roots)) }
+            if rule.match!.worktrees != nil { worktreeRules.append((index, rule, roots)) }
         }
         var excluded = Set(RuleEngine.defaultPatternExcludes.map { PathUtil.expand(PathUtil.canonicalPattern($0)) })
         for (_, rule) in patternRules {
@@ -294,7 +296,7 @@ public struct RuleEngine: Sendable {
         let globExcludes = patternRules.flatMap { $0.element.match!.exclude.filter { $0.contains("*") } }
 
         let roots = allRoots.sorted().filter { candidate in !allRoots.contains { PathUtil.isStrictAncestor($0, of: candidate) } }
-        let search = PatternSearch(byName: byName, excluded: excluded, globExcludes: globExcludes)
+        let search = PatternSearch(byName: byName, worktreeRules: worktreeRules, excluded: excluded, globExcludes: globExcludes)
         var claims: [Claim] = []
         for root in roots {
             var stack: [(DirNode, String)] = search.starts(under: root, in: tree)
@@ -321,6 +323,9 @@ public struct RuleEngine: Sendable {
                         matched = true
                         break
                     }
+                    if !matched, !worktreeRules.isEmpty {
+                        matched = worktreeMatch(child, path: childPath, parent: node, rules: worktreeRules, tree: tree, into: &claims)
+                    }
                     if !matched { stack.append((child, childPath)) }
                 }
             }
@@ -328,10 +333,35 @@ public struct RuleEngine: Sendable {
         return claims
     }
 
+    /// Whether a worktree rule matches `child`, an unused linked worktree, adding its claim unless the rule excludes it.
+    /// Only a folder with a `.git` file (the `.git` marker, but no `.git` folder) is read from disk. A worktree in use
+    /// isn't matched, so the walk goes on into it and its `node_modules` and build output stay with their own rules.
+    private func worktreeMatch(
+        _ child: DirNode, path: String, parent: DirNode, rules: [(Int, Rule, [String])], tree: ScanTree, into claims: inout [Claim]
+    ) -> Bool {
+        guard tree.markers.contains(".git", in: child.markers), child.child(named: ".git") == nil,
+            let worktree = GitWorktree.at(path)
+        else { return false }
+        let lastUsed = [child.lastUsed, worktree.lastGitActivity].compactMap { $0 }.max()
+        for (index, rule, ruleRoots) in rules {
+            guard let match = rule.match, let worktrees = match.worktrees,
+                ruleRoots.contains(where: { PathUtil.isAncestorOrEqual($0, of: path) }),
+                match.markersPresent(
+                    sibling: { tree.markers.contains($0, in: parent.markers) }, inside: { tree.markers.contains($0, in: child.markers) }),
+                worktrees.isUnused(worktree, lastUsed: lastUsed)
+            else { continue }
+            let item = RuleEngine.item(for: child, markers: tree.markers, project: worktree.repository, lastUsed: lastUsed)
+            if !isExcluded(item, by: rule) { claims.append(Claim(rule: index, item: item, specificity: 0)) }
+            return true
+        }
+        return false
+    }
+
     /// Where the pattern walk under one root begins. A tree scanned only for some rules may hold just folders
     /// below the root; the walk starts at each of them that a walk from the root would have reached.
     private struct PatternSearch {
         let byName: [String: [(Int, Rule, [String])]]
+        let worktreeRules: [(Int, Rule, [String])]
         let excluded: Set<String>
         let globExcludes: [String]
 
@@ -362,10 +392,19 @@ public struct RuleEngine: Sendable {
 
         private func matches(_ path: String, name: String, parent: String) -> Bool {
             let exists = { (folder: String, entry: String) -> Bool in FileManager.default.fileExists(atPath: PathUtil.join(folder, entry)) }
-            return (byName[name] ?? []).contains { _, rule, ruleRoots in
+            let named = (byName[name] ?? []).contains { _, rule, ruleRoots in
                 guard let match = rule.match, ruleRoots.contains(where: { PathUtil.isAncestorOrEqual($0, of: path) }) else { return false }
                 return match.markersPresent(sibling: { exists(parent, $0) }, inside: { exists(path, $0) })
             }
+            // Whether a worktree is idle depends on everything inside it, which a tree rooted below it doesn't hold; an
+            // orphaned one is matched whatever is inside, so only that is decided here.
+            return named
+                || worktreeRules.contains { _, rule, ruleRoots in
+                    guard let match = rule.match, ruleRoots.contains(where: { PathUtil.isAncestorOrEqual($0, of: path) })
+                    else { return false }
+                    return match.markersPresent(sibling: { exists(parent, $0) }, inside: { exists(path, $0) })
+                        && GitWorktree.at(path)?.isOrphaned == true
+                }
         }
     }
 

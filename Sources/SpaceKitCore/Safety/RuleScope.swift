@@ -1,7 +1,8 @@
 import Foundation
 
-/// Where a rule applies: under one of its paths, or, for a pattern rule, a folder with a matching name under its
-/// roots (or the configured developer roots), outside its exclusions, the default pattern exclusions and bundles.
+/// Where a rule applies: under one of its paths, or, for a pattern rule, a folder with a matching name (for a worktree
+/// rule, a linked git worktree) under its roots (or the configured developer roots), outside its exclusions, the
+/// default pattern exclusions and bundles.
 /// The guard, the rule index and `RuleEngine` must agree on this, or an item one of them rejects gets a rule's
 /// trust from another.
 struct RuleScope: Sendable {
@@ -14,7 +15,11 @@ struct RuleScope: Sendable {
     func contains(_ path: String, rule: Rule) -> Bool {
         let paths = rule.checkedPaths(home: home).kept.map { PathUtil.expand($0, home: home) }
         if paths.contains(where: { PathUtil.isInside(path, pattern: $0) }) { return true }
-        guard let match = rule.match, match.names.contains(PathUtil.lastComponent(path)) else { return false }
+        // Any linked worktree counts for a worktree rule, idle or not: whether it's idle depends on everything inside it.
+        // A worktree is a repository, so the guard asks before removing one by hand and never removes one automatically.
+        guard let match = rule.match,
+            match.names.contains(PathUtil.lastComponent(path)) || (match.worktrees != nil && GitWorktree.at(path) != nil)
+        else { return false }
         let roots = (match.roots ?? patternRoots).map(resolve)
         guard roots.contains(where: { PathUtil.isAncestorOrEqual($0, of: path) }) else { return false }
         return !isExcluded(path, match: match)

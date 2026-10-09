@@ -202,9 +202,10 @@ public struct Rule: Codable, Sendable, Identifiable, Hashable {
     }
 }
 
-/// Name-based matching, e.g. every `node_modules` that sits next to a `package.json`.
+/// Name-based matching, e.g. every `node_modules` that sits next to a `package.json`, or, with `worktrees`, every
+/// unused git worktree whatever its name.
 public struct PatternSpec: Codable, Sendable, Hashable {
-    /// Directory names to match.
+    /// Directory names to match. Empty when `worktrees` is set.
     public var names: [String]
     /// At least one of these must exist next to the match (in its parent directory).
     public var sibling: [String]
@@ -214,16 +215,22 @@ public struct PatternSpec: Codable, Sendable, Hashable {
     public var roots: [String]?
     /// Globs that are never searched (in addition to SpaceKit's defaults such as `~/Library`).
     public var exclude: [String]
+    /// Match linked git worktrees that are unused instead of folders by name.
+    public var worktrees: WorktreeSpec?
 
-    public init(names: [String], sibling: [String] = [], contains: [String] = [], roots: [String]? = nil, exclude: [String] = []) {
+    public init(
+        names: [String], sibling: [String] = [], contains: [String] = [], roots: [String]? = nil, exclude: [String] = [],
+        worktrees: WorktreeSpec? = nil
+    ) {
         self.names = names
         self.sibling = sibling
         self.contains = contains
         self.roots = roots
         self.exclude = exclude
+        self.worktrees = worktrees
     }
 
-    enum CodingKeys: String, CodingKey { case names, name, sibling, contains, roots, exclude }
+    enum CodingKeys: String, CodingKey { case names, name, sibling, contains, roots, exclude, worktrees }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -232,6 +239,7 @@ public struct PatternSpec: Codable, Sendable, Hashable {
         contains = try c.decodeStringOrListIfPresent(forKey: .contains) ?? []
         roots = try c.decodeIfPresent([String].self, forKey: .roots)
         exclude = try c.decodeStringOrListIfPresent(forKey: .exclude) ?? []
+        worktrees = try c.decodeIfPresent(WorktreeSpec.self, forKey: .worktrees)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -241,6 +249,35 @@ public struct PatternSpec: Codable, Sendable, Hashable {
         if !contains.isEmpty { try c.encode(contains, forKey: .contains) }
         try c.encodeIfPresent(roots, forKey: .roots)
         if !exclude.isEmpty { try c.encode(exclude, forKey: .exclude) }
+        try c.encodeIfPresent(worktrees, forKey: .worktrees)
+    }
+}
+
+/// Which linked git worktrees (`GitWorktree`) a pattern rule matches: orphaned ones, and those idle for `idleFor`.
+public struct WorktreeSpec: Codable, Sendable, Hashable {
+    /// A worktree is unused once nothing changed in it, and git recorded nothing for it, for this long.
+    public var idleFor: Age
+
+    public init(idleFor: Age) {
+        self.idleFor = idleFor
+    }
+
+    enum CodingKeys: String, CodingKey { case idleFor }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        guard let idleFor = try c.decodeRetentionIfPresent(forKey: .idleFor) else {
+            throw DecodingError.keyNotFound(
+                CodingKeys.idleFor, .init(codingPath: c.codingPath, debugDescription: "`match.worktrees` needs `idleFor`, such as 30d"))
+        }
+        self.idleFor = idleFor
+    }
+
+    /// Whether a worktree last used at `lastUsed` counts as unused at `now`.
+    func isUnused(_ worktree: GitWorktree, lastUsed: Date?, now: Date = Date()) -> Bool {
+        guard !worktree.isOrphaned else { return true }
+        guard let lastUsed else { return false }
+        return Age.since(lastUsed, now: now) >= idleFor
     }
 }
 
