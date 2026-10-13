@@ -2,14 +2,19 @@
 # Uploads the installer to the website's downloads volume, where buyers download it from. The site serves
 # the newest .pkg there, so publishing a new version is just uploading it.
 #
-#   DEPLOY_TARGET=root@my-server:/var/lib/docker/volumes/<volume>/_data/downloads scripts/publish-installer.sh
+#   DEPLOY_TARGET=root@my-server:/var/lib/docker/volumes/<volume>/_data/downloads scripts/publish-installer.sh [file]
+#
+# Uploads build/SpaceKit-<version>.pkg, or the .dmg when there's no .pkg, or the file you name.
 #
 # Build and notarize it first (scripts/build-installer.sh). Setup: web/README.md.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 VERSION="${VERSION:-$(grep -m1 'static let version' Sources/SpaceKitCLI/SpaceKitCommand.swift | sed -E 's/.*"(.*)".*/\1/')}"
-PKG="build/SpaceKit-$VERSION.pkg"
+PKG="${1:-build/SpaceKit-$VERSION.pkg}"
+if [ -z "${1:-}" ] && [ ! -f "$PKG" ]; then
+  PKG="build/SpaceKit-$VERSION.dmg"
+fi
 : "${DEPLOY_TARGET:?Set DEPLOY_TARGET=user@host:/path/to/downloads (see web/README.md)}"
 
 [ -f "$PKG" ] || { echo "✗ $PKG doesn't exist. Run scripts/build-installer.sh first." >&2; exit 1; }

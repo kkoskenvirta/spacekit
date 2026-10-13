@@ -34,6 +34,10 @@ async function claim(attempt = 0) {
   if (body.status === "ready") {
     document.getElementById("download").href = body.download_url;
     document.getElementById("file-meta").textContent = `${body.file} · ${formatSize(body.size)} · macOS 15+`;
+    if (body.file.endsWith(".dmg")) {
+      document.getElementById("step-install").innerHTML =
+        "Open the downloaded <b>disk image</b> and drag <b>SpaceKit</b> into the <b>Applications</b> folder.";
+    }
     if (body.email) document.getElementById("ready-email").textContent = `, ${body.email}`;
     show("ready");
     return;
