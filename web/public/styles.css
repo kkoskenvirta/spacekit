@@ -2010,3 +2010,42 @@ footer {
 .faq a {
   color: var(--text-2);
 }
+
+/* Open-source links */
+
+.nav-links .nav-github,
+.hero-meta .meta-link,
+.card-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.hero-meta .meta-link {
+  color: var(--text-3);
+  text-decoration: none;
+}
+
+.hero-meta .meta-link:hover {
+  color: var(--text);
+}
+
+.hero-meta .meta-link svg {
+  color: inherit;
+}
+
+.card-link {
+  margin-top: 16px;
+  font-size: 14px;
+  color: var(--brand-hi);
+  text-decoration: none;
+}
+
+.card-link:hover {
+  text-decoration: underline;
+}
+
+.section-head p a,
+.price-card .tagline a {
+  color: var(--text);
+}
