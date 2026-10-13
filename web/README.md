@@ -41,8 +41,8 @@ Build an installer first (`make installer` in the repo root) so there's somethin
    - Support email: the same address as `SUPPORT_EMAIL`.
    - Terms of service: `https://<your-domain>/terms`. Privacy policy: `https://<your-domain>/privacy`.
    - Statement descriptor: `SPACEKIT`, so buyers recognise the charge.
-2. **Product** (Product catalog → Add product): *SpaceKit for Mac*, one-time price **$5.00 USD**, under *More pricing options* set *Include tax in price* to **Yes** (the
-   site advertises $5 with taxes included, as EU consumer law expects). Tax
+2. **Product** (Product catalog → Add product): *SpaceKit for Mac*, one-time price **$5.00 USD**, under *More pricing options* set *Include tax in price* to **No** (the
+   site advertises $5 plus any tax due, added at checkout). Tax
    code: *Downloadable software, personal use*.
 3. **Tax.** Stripe isn't a merchant of record, so VAT on sales to consumers is yours to collect and report.
    In Settings → Tax, set your origin address and add your registrations; for EU consumers that's
