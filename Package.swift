@@ -13,6 +13,8 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.5.0"),
         .package(url: "https://github.com/jpsim/Yams", from: "5.1.0"),
+        // In-app updates. Only the app links it; build-app.sh puts Sparkle.framework in the bundle.
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.6.0"),
     ],
     targets: [
         .target(
@@ -41,7 +43,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "SpaceKitApp",
-            dependencies: ["SpaceKitCore"]
+            dependencies: ["SpaceKitCore", .product(name: "Sparkle", package: "Sparkle")]
         ),
         .testTarget(
             name: "SpaceKitCoreTests",

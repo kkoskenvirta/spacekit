@@ -319,7 +319,7 @@ private struct ConfigFilePane: View {
     }
 }
 
-/// Update checks and the purchase key that downloads updates from spacekit.studio.
+/// Sparkle's update settings and the purchase key that unlocks updates from spacekit.studio.
 private struct UpdatesSettingsPane: View {
     @Environment(UpdateController.self) private var updates
     @State private var keyText = ""
@@ -331,16 +331,17 @@ private struct UpdatesSettingsPane: View {
             Section("Updates") {
                 LabeledContent("This version", value: updates.currentVersion ?? "Development build")
                 Toggle("Check for updates automatically", isOn: $updates.checksAutomatically)
-                Text("Once a day SpaceKit asks spacekit.studio for the newest version number. It sends nothing but its own version.")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .disabled(!updates.canCheck)
+                Toggle("Download and install updates automatically", isOn: $updates.installsAutomatically)
+                    .disabled(!updates.canCheck || !updates.checksAutomatically)
+                Text(
+                    "Once a day SpaceKit asks spacekit.studio whether a newer version exists. Installed updates are verified with SpaceKit's signature before they replace the app."
+                )
+                .font(.caption).foregroundStyle(.secondary)
                 HStack {
-                    Button("Check Now") { Task { await updates.check(userInitiated: true) } }
-                        .disabled(updates.isChecking || updates.currentVersion == nil)
-                    if updates.isChecking { ProgressView().controlSize(.small) }
+                    Button("Check Now") { updates.checkForUpdates() }.disabled(!updates.canCheck)
                     Spacer()
-                    if let release = updates.available {
-                        Button("Download \(release.version)") { updates.download() }.buttonStyle(.borderedProminent)
-                    } else if let checked = updates.lastChecked {
+                    if let checked = updates.lastChecked {
                         Text("Last checked \(checked.formatted(.relative(presentation: .named)))").font(.caption).foregroundStyle(
                             .secondary)
                     }
@@ -357,12 +358,14 @@ private struct UpdatesSettingsPane: View {
                 HStack {
                     Button("Save") { saveKey() }
                     if updates.purchaseKey != nil {
-                        Label("Linked: updates download straight away", systemImage: "checkmark.seal.fill")
+                        Label("Linked: updates install from inside SpaceKit", systemImage: "checkmark.seal.fill")
                             .font(.caption).foregroundStyle(Theme.good)
                     }
+                    Spacer()
+                    Button("Download Page") { updates.openDownloadPage() }
                 }
                 Text(
-                    "Your purchase key is on the download page you got after buying SpaceKit: click Link to SpaceKit there, or paste the page's address here. Lost it? Email support with your receipt."
+                    "Updates are free. Your purchase key is on the download page you got after buying SpaceKit: click Link to SpaceKit there, or paste the page's address here. Lost it? Email support with your receipt."
                 )
                 .font(.caption).foregroundStyle(.secondary)
             }

@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 
-import { compareVersions, createHandler, installerVersion, loadConfig } from "../server.mjs";
+import { compareVersions, createHandler, installerVersion, loadConfig, markdownToHtml } from "../server.mjs";
 
 const PAID = "cs_test_a1PaidSession0000000000";
 const UNPAID = "cs_test_a1OpenSession0000000000";
@@ -237,4 +237,90 @@ test("the update page is served", async () => {
   const res = await fetch(`${base}/update`);
   assert.equal(res.status, 200);
   assert.match(await res.text(), /Update SpaceKit/);
+});
+
+async function appcastServer(files) {
+  const downloads = await mkdtemp(join(tmpdir(), "spacekit-web-"));
+  for (const [name, content] of Object.entries(files)) await writeFile(join(downloads, name), content);
+  const { config } = loadConfig({
+    STRIPE_SECRET_KEY: "rk_test_key",
+    STRIPE_PAYMENT_LINK_ID: "plink_spacekit",
+    DOWNLOAD_SECRET: "a".repeat(40),
+    DOWNLOADS_DIR: downloads,
+  });
+  const local = createServer(createHandler(config, { fetch: fakeStripe, log: () => {} }));
+  await new Promise((resolve) => local.listen(0, resolve));
+  return { url: `http://127.0.0.1:${local.address().port}`, close: () => local.close() };
+}
+
+const DMG = "dmg-bytes-0.3.0";
+const SIG = `sparkle:edSignature="c2lnbmF0dXJl+/=" length="${DMG.length}"`;
+
+test("the appcast offers a signed download only for a paid purchase key", async () => {
+  const site = await appcastServer({
+    "SpaceKit-0.2.0.dmg": "old",
+    "SpaceKit-0.3.0.dmg": DMG,
+    "SpaceKit-0.3.0.dmg.sig": SIG,
+    "SpaceKit-0.3.0.notes.md": "- **Sparkle** updates <script>\n",
+  });
+  try {
+    const paid = await fetch(`${site.url}/appcast.xml?key=${PAID}`);
+    assert.equal(paid.status, 200);
+    assert.match(paid.headers.get("content-type"), /rss\+xml/);
+    assert.equal(paid.headers.get("cache-control"), "no-store");
+    const feed = await paid.text();
+    assert.match(feed, /<sparkle:version>0\.3\.0<\/sparkle:version>/);
+    assert.match(feed, /<sparkle:minimumSystemVersion>15\.0</);
+    assert.match(feed, /sparkle:edSignature="c2lnbmF0dXJl\+\/="/);
+    assert.match(feed, new RegExp(`length="${DMG.length}"`));
+    assert.match(feed, /<li><b>Sparkle<\/b> updates &lt;script&gt;<\/li>/);
+    assert.doesNotMatch(feed, /informationalUpdate/);
+    const enclosure = /<enclosure url="([^"]+)"/.exec(feed)[1].replaceAll("&amp;", "&");
+    assert.ok(enclosure.startsWith(`${site.url}/download/`));
+    assert.equal(await (await fetch(enclosure)).text(), DMG);
+
+    for (const key of ["", UNPAID, MISSING, "garbage"]) {
+      const text = await (await fetch(`${site.url}/appcast.xml?key=${key}`)).text();
+      assert.match(text, /<sparkle:version>0\.3\.0</, key);
+      assert.match(text, /<sparkle:informationalUpdate>/, key);
+      assert.match(text, /<link>http:\/\/127\.0\.0\.1:\d+\/update/, key);
+      assert.doesNotMatch(text, /<enclosure/, key);
+    }
+  } finally {
+    site.close();
+  }
+});
+
+test("the appcast doesn't offer a download whose signature is missing or for another file", async () => {
+  for (const files of [
+    { "SpaceKit-0.3.0.dmg": DMG },
+    { "SpaceKit-0.3.0.dmg": DMG, "SpaceKit-0.3.0.dmg.sig": 'sparkle:edSignature="abc=" length="1"' },
+  ]) {
+    const site = await appcastServer(files);
+    try {
+      const text = await (await fetch(`${site.url}/appcast.xml?key=${PAID}`)).text();
+      assert.match(text, /<sparkle:informationalUpdate>/);
+      assert.doesNotMatch(text, /<enclosure/);
+    } finally {
+      site.close();
+    }
+  }
+});
+
+test("an empty downloads folder gives an empty appcast", async () => {
+  const site = await appcastServer({});
+  try {
+    const text = await (await fetch(`${site.url}/appcast.xml`)).text();
+    assert.match(text, /<channel>/);
+    assert.doesNotMatch(text, /<item>/);
+  } finally {
+    site.close();
+  }
+});
+
+test("release notes Markdown becomes simple, escaped HTML", () => {
+  assert.equal(
+    markdownToHtml("**New**\n\n- one *two*\n- `three`\nend ]]>"),
+    "<p><b>New</b></p>\n<ul>\n<li>one <i>two</i></li>\n<li><code>three</code></li>\n</ul>\n<p>end ]]&gt;</p>",
+  );
 });

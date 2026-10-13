@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Builds SpaceKit.app: the SwiftUI app and the `spacekit` CLI (used by the background agent). Both have the
-# built-in rules from rules/ compiled in, so the bundle carries no rule files.
+# built-in rules from rules/ compiled in, so the bundle carries no rule files. The app updates itself with
+# Sparkle (Contents/Frameworks/Sparkle.framework), from the appcast at spacekit.studio.
 #
 #   scripts/build-app.sh            → build/SpaceKit.app (release, ad-hoc signed)
 #   SIGN_IDENTITY="Developer ID Application: …" scripts/build-app.sh
@@ -12,6 +13,9 @@ ROOT="$(pwd)"
 VERSION="${VERSION:-$(grep -m1 'static let version' Sources/SpaceKitCLI/SpaceKitCommand.swift | sed -E 's/.*"(.*)".*/\1/')}"
 CONFIGURATION="${CONFIGURATION:-release}"
 APP="$ROOT/build/SpaceKit.app"
+FEED_URL="${FEED_URL:-https://spacekit.studio/appcast.xml}"
+# Updates must be signed with the private half of this key (in the release machine's keychain).
+SPARKLE_PUBLIC_KEY="$(tr -d '[:space:]' <"$ROOT/installer/sparkle-public-key.txt")"
 SIGN_IDENTITY="${SIGN_IDENTITY:--}"
 ARCH_FLAGS=()
 for arch in ${ARCHS:-}; do
@@ -31,8 +35,11 @@ BIN="$(swift build -c "$CONFIGURATION" ${ARCH_FLAGS[@]+"${ARCH_FLAGS[@]}"} --sho
 
 echo "→ Assembling $APP"
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Helpers" "$APP/Contents/Resources"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Helpers" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
 cp "$BIN/SpaceKitApp" "$APP/Contents/MacOS/SpaceKit"
+ditto "$BIN/Sparkle.framework" "$APP/Contents/Frameworks/Sparkle.framework"
+# SwiftPM links Sparkle through @rpath but only searches next to the binary; apps keep frameworks here.
+install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/SpaceKit"
 # Helpers/, not MacOS/: on a case-insensitive volume "spacekit" would overwrite "SpaceKit".
 cp "$BIN/spacekit" "$APP/Contents/Helpers/spacekit"
 
@@ -67,6 +74,10 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSHumanReadableCopyright</key><string>Open source under the MIT License.</string>
+  <key>SUFeedURL</key><string>$FEED_URL</string>
+  <key>SUPublicEDKey</key><string>$SPARKLE_PUBLIC_KEY</string>
+  <key>SUEnableAutomaticChecks</key><true/>
+  <key>SUScheduledCheckInterval</key><integer>86400</integer>
   <key>CFBundleURLTypes</key>
   <array>
     <dict>
@@ -84,7 +95,17 @@ TIMESTAMP=()
 if [ "$SIGN_IDENTITY" != "-" ]; then
   TIMESTAMP=(--timestamp)
 fi
-codesign --force --options runtime ${TIMESTAMP[@]+"${TIMESTAMP[@]}"} --sign "$SIGN_IDENTITY" "$APP/Contents/Helpers/spacekit"
+sign() {
+  codesign --force --options runtime ${TIMESTAMP[@]+"${TIMESTAMP[@]}"} --sign "$SIGN_IDENTITY" "$@"
+}
+# Sparkle's helpers inside out, as its documentation describes for re-signing with your own identity.
+SPARKLE="$APP/Contents/Frameworks/Sparkle.framework/Versions/B"
+sign "$SPARKLE/XPCServices/Installer.xpc"
+sign --preserve-metadata=entitlements "$SPARKLE/XPCServices/Downloader.xpc"
+sign "$SPARKLE/Autoupdate"
+sign "$SPARKLE/Updater.app"
+sign "$APP/Contents/Frameworks/Sparkle.framework"
+sign "$APP/Contents/Helpers/spacekit"
 codesign --force --options runtime ${TIMESTAMP[@]+"${TIMESTAMP[@]}"} --sign "$SIGN_IDENTITY" "$APP"
 
 echo "✓ $APP"

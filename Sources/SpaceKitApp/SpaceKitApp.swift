@@ -24,8 +24,7 @@ struct SpaceKitApp: App {
         .defaultSize(width: 1320, height: 860)
         .commands {
             CommandGroup(after: .appInfo) {
-                Button("Check for Updates…") { Task { await updates.check(userInitiated: true) } }
-                    .disabled(updates.isChecking)
+                Button("Check for Updates…") { updates.checkForUpdates() }
             }
             CommandGroup(after: .newItem) {
                 Button("Scan Startup Disk") { model.scan("/") }.keyboardShortcut("1", modifiers: [.command, .shift])
@@ -54,7 +53,7 @@ struct SpaceKitApp: App {
         }
 
         MenuBarExtra {
-            MenuBarContent().environment(model).environment(updates)
+            MenuBarContent().environment(model)
         } label: {
             Image(systemName: "internaldrive")
         }
@@ -111,7 +110,6 @@ struct RootView: View {
         } detail: {
             VStack(spacing: 0) {
                 if let error = model.configError { ConfigErrorBanner(error: error) }
-                if let release = updates.available { UpdateBanner(release: release) }
                 Group {
                     switch model.section {
                     case .explore: ExploreView()
@@ -143,8 +141,8 @@ struct RootView: View {
             Text(model.errorMessage ?? "")
         }
         .background {
-            // Answers to "Check for Updates…" and spacekit:// links; on a background view so it doesn't
-            // share a modifier with the alert above.
+            // Answers to spacekit:// links; on a background view so it doesn't share a modifier with the
+            // alert above. Sparkle shows its own windows for updates.
             Color.clear.alert(
                 "SpaceKit Updates", isPresented: Binding(get: { updates.message != nil }, set: { if !$0 { updates.message = nil } })
             ) {
@@ -158,51 +156,7 @@ struct RootView: View {
                 DebugAutomation.start(model: model)
             #endif
             if model.tree == nil && !model.showOnboarding { model.scan() }
-            updates.start()
         }
-    }
-}
-
-/// Shown above every section while a newer SpaceKit is available.
-struct UpdateBanner: View {
-    @Environment(UpdateController.self) private var updates
-    let release: ReleaseInfo
-    @State private var showingNotes = false
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Image(systemName: "arrow.down.circle.fill").foregroundStyle(Theme.categorical(0))
-            VStack(alignment: .leading, spacing: 2) {
-                Text("SpaceKit \(release.version) is available").font(.callout.weight(.semibold))
-                Text(
-                    updates.purchaseKey == nil
-                        ? "You have \(updates.currentVersion ?? "an older version"). Download it with your purchase key, from your download page."
-                        : "You have \(updates.currentVersion ?? "an older version"). It's free for you: your purchase is linked."
-                )
-                .font(.caption).foregroundStyle(.secondary)
-            }
-            Spacer()
-            if let notes = release.notes, !notes.isEmpty {
-                Button("What's New") { showingNotes = true }
-                    .popover(isPresented: $showingNotes, arrowEdge: .bottom) {
-                        ScrollView {
-                            Text(
-                                (try? AttributedString(markdown: notes, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
-                                    ?? AttributedString(notes)
-                            )
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(16)
-                        }
-                        .frame(width: 420, height: 300)
-                    }
-            }
-            Button("Skip This Version") { updates.skip() }
-            Button("Later") { updates.dismiss() }
-            Button("Download") { updates.download() }.buttonStyle(.borderedProminent)
-        }
-        .padding(10)
-        .background(Theme.categorical(0).opacity(0.12))
     }
 }
 
@@ -374,7 +328,6 @@ struct CleanupListPopover: View {
 /// Compact status in the menu bar: free space, next job, pending suggestions.
 struct MenuBarContent: View {
     @Environment(AppModel.self) private var model
-    @Environment(UpdateController.self) private var updates
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -390,14 +343,6 @@ struct MenuBarContent: View {
             if model.recovered90Days > 0 {
                 Label("Recovered \(model.recovered90Days.formattedBytes) in 3 months", systemImage: "arrow.uturn.backward.circle").font(
                     .callout)
-            }
-            if let release = updates.available {
-                Button {
-                    updates.download()
-                } label: {
-                    Label("SpaceKit \(release.version) is available", systemImage: "arrow.down.circle")
-                }
-                .buttonStyle(.link)
             }
             if !model.suggestions.isEmpty {
                 Button {

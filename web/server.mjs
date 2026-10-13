@@ -79,9 +79,11 @@ export function createHandler(config, { fetch = globalThis.fetch, now = () => Da
     return createHmac("sha256", config.downloadSecret).update(payload).digest("base64url");
   }
 
-  function issueToken(sessionId) {
+  // A signed download link for a purchase. With `file`, it serves exactly that installer (the one an
+  // appcast's signature covers); without, whatever is newest when it's used.
+  function issueToken(sessionId, { file, ttlSeconds = config.downloadTtlSeconds } = {}) {
     const payload = Buffer.from(
-      JSON.stringify({ s: sessionId, exp: Math.floor(now() / 1000) + config.downloadTtlSeconds }),
+      JSON.stringify({ s: sessionId, ...(file ? { f: file } : {}), exp: Math.floor(now() / 1000) + ttlSeconds }),
     ).toString("base64url");
     return `${payload}.${sign(payload)}`;
   }
@@ -124,6 +126,17 @@ export function createHandler(config, { fetch = globalThis.fetch, now = () => Da
     return candidates[0] ?? null;
   }
 
+  async function namedInstaller(name) {
+    if (!installerVersion(name)) return null;
+    try {
+      const path = join(config.downloadsDir, name);
+      const info = await stat(path);
+      return info.isFile() ? { name, path, size: info.size, mtime: info.mtimeMs, version: installerVersion(name) } : null;
+    } catch {
+      return null;
+    }
+  }
+
   // Release notes uploaded next to an installer, as SpaceKit-<version>.notes.md.
   async function releaseNotes(version) {
     if (!version) return null;
@@ -153,11 +166,19 @@ export function createHandler(config, { fetch = globalThis.fetch, now = () => Da
   }
 
   async function claim(sessionId) {
-    if (!SESSION_ID.test(sessionId)) return [400, { status: "invalid", message: "That isn't a valid purchase link." }];
+    const purchase = await verifyPurchase(sessionId);
+    return purchase.paid ? ready(sessionId, purchase.email) : purchase.answer;
+  }
+
+  // Whether a purchase key is a paid SpaceKit purchase: { paid: true, email } or { paid: false, answer }
+  // with the HTTP status and body that explain why not. Paid purchases are remembered for an hour.
+  async function verifyPurchase(sessionId) {
+    const no = (status, body) => ({ paid: false, answer: [status, body] });
+    if (!SESSION_ID.test(sessionId)) return no(400, { status: "invalid", message: "That isn't a valid purchase link." });
     const cached = claims.get(sessionId);
-    if (cached && cached.until > now()) return ready(sessionId, cached.email);
+    if (cached && cached.until > now()) return { paid: true, email: cached.email };
     if (!config.stripeKey || config.downloadSecret.length < 32) {
-      return [503, { status: "unavailable", message: "Downloads are temporarily unavailable." }];
+      return no(503, { status: "unavailable", message: "Downloads are temporarily unavailable." });
     }
 
     let response;
@@ -168,36 +189,36 @@ export function createHandler(config, { fetch = globalThis.fetch, now = () => Da
       });
     } catch (error) {
       log(`claim ${sessionId}: Stripe unreachable (${error.message})`);
-      return [502, { status: "unavailable", message: "We couldn't reach the payment provider. Try again in a moment." }];
+      return no(502, { status: "unavailable", message: "We couldn't reach the payment provider. Try again in a moment." });
     }
     if (response.status === 404) {
-      return [404, { status: "not_found", message: "We couldn't find that purchase." }];
+      return no(404, { status: "not_found", message: "We couldn't find that purchase." });
     }
     if (!response.ok) {
       log(`claim ${sessionId}: Stripe answered ${response.status}`);
-      return [502, { status: "unavailable", message: "The payment provider didn't answer. Try again in a moment." }];
+      return no(502, { status: "unavailable", message: "The payment provider didn't answer. Try again in a moment." });
     }
 
     const session = await response.json();
     if (config.paymentLinkId && session.payment_link !== config.paymentLinkId) {
       log(`claim ${sessionId}: session is from another payment link`);
-      return [404, { status: "not_found", message: "That purchase isn't for SpaceKit." }];
+      return no(404, { status: "not_found", message: "That purchase isn't for SpaceKit." });
     }
     if (session.status === "expired") {
-      return [410, { status: "expired", message: "This checkout expired before it was paid." }];
+      return no(410, { status: "expired", message: "This checkout expired before it was paid." });
     }
     if (session.status !== "complete") {
-      return [402, { status: "unpaid", message: "This checkout hasn't been paid yet." }];
+      return no(402, { status: "unpaid", message: "This checkout hasn't been paid yet." });
     }
     // Card payments are paid on completion; bank debits and the like settle later.
     if (session.payment_status !== "paid" && session.payment_status !== "no_payment_required") {
-      return [202, { status: "processing", message: "Your payment is being processed. You'll get an email receipt from Stripe once it clears; come back to this page then." }];
+      return no(202, { status: "processing", message: "Your payment is being processed. You'll get an email receipt from Stripe once it clears; come back to this page then." });
     }
 
     const email = session.customer_details?.email ?? null;
     claims.set(sessionId, { until: now() + 60 * 60 * 1000, email });
     log(`claim ${sessionId}: paid`);
-    return ready(sessionId, email);
+    return { paid: true, email };
   }
 
   // A paid purchase's answer: the current installer and a fresh link to it.
@@ -211,10 +232,75 @@ export function createHandler(config, { fetch = globalThis.fetch, now = () => Da
     return [200, { ...body, download_url: `/download/${issueToken(sessionId)}` }];
   }
 
+  // The Sparkle appcast the app checks for updates (/appcast.xml?key=<purchase key>). It always names the
+  // newest version; only for a paid purchase key does it include the signed download Sparkle installs.
+  // Anyone else gets it as an informational update that links to the update page.
+  async function appcast(req, key) {
+    const installer = await findInstaller();
+    const origin = publicOrigin(req);
+    const items = [];
+    if (installer?.version) {
+      const version = installer.version;
+      const dmg = `SpaceKit-${version}.dmg`;
+      const signature = await updateSignature(dmg);
+      const purchase = key ? await verifyPurchase(key) : null;
+      const installable = Boolean(purchase?.paid && signature);
+      const notes = await releaseNotes(version);
+      const page = `${origin}/update${key && SESSION_ID.test(key) ? `?session_id=${key}` : ""}`;
+      const lines = [
+        "    <item>",
+        `      <title>SpaceKit ${version}</title>`,
+        `      <pubDate>${new Date(installer.mtime).toUTCString()}</pubDate>`,
+        `      <sparkle:version>${version}</sparkle:version>`,
+        `      <sparkle:shortVersionString>${version}</sparkle:shortVersionString>`,
+        "      <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>",
+      ];
+      if (notes) lines.push(`      <description><![CDATA[${markdownToHtml(notes)}]]></description>`);
+      if (installable) {
+        // A week, so an update the buyer postpones still downloads.
+        const token = issueToken(key, { file: dmg, ttlSeconds: 7 * 24 * 60 * 60 });
+        lines.push(
+          `      <enclosure url="${xml(`${origin}/download/${token}`)}" length="${signature.length}" type="application/octet-stream" sparkle:edSignature="${xml(signature.edSignature)}"/>`,
+        );
+      } else {
+        lines.push(`      <link>${xml(page)}</link>`, "      <sparkle:informationalUpdate></sparkle:informationalUpdate>");
+      }
+      lines.push("    </item>");
+      items.push(lines.join("\n"));
+      if (key) log(`appcast ${key.slice(0, 16)}…: ${installable ? "installable" : purchase?.paid ? "paid, no signature" : "not paid"} ${version}`);
+    }
+    return [
+      '<?xml version="1.0" encoding="utf-8"?>',
+      '<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">',
+      "  <channel>",
+      "    <title>SpaceKit</title>",
+      `    <link>${xml(origin)}</link>`,
+      ...items,
+      "  </channel>",
+      "</rss>",
+      "",
+    ].join("\n");
+  }
+
+  // The Sparkle signature uploaded next to a DMG, as sign_update prints it: sparkle:edSignature="…" length="…".
+  async function updateSignature(dmg) {
+    try {
+      const text = await readFile(join(config.downloadsDir, `${dmg}.sig`), "utf8");
+      const edSignature = /edSignature="([A-Za-z0-9+/=]+)"/.exec(text)?.[1];
+      const length = /length="(\d+)"/.exec(text)?.[1];
+      const info = await stat(join(config.downloadsDir, dmg));
+      // A signature for some other upload of the file would fail in the app anyway; don't offer it.
+      if (!edSignature || !length || Number(length) !== info.size) return null;
+      return { edSignature, length };
+    } catch {
+      return null;
+    }
+  }
+
   async function serveDownload(req, res, token) {
     const data = readToken(token);
     if (!data) return sendHtmlError(res, 410, "This download link has expired", "Open the link from your purchase page or receipt again to get a fresh one.");
-    const installer = await findInstaller();
+    const installer = data.f ? await namedInstaller(data.f) : await findInstaller();
     if (!installer) return sendHtmlError(res, 503, "The download isn't available right now", "Please try again in a few minutes.");
     res.writeHead(200, {
       ...SECURITY_HEADERS,
@@ -302,6 +388,15 @@ export function createHandler(config, { fetch = globalThis.fetch, now = () => Da
         });
         return res.end(req.method === "HEAD" ? undefined : JSON.stringify(body));
       }
+      if (pathname === "/appcast.xml") {
+        if (!limiter(clientAddress(req))) {
+          res.writeHead(429, { ...SECURITY_HEADERS, "Retry-After": "600" });
+          return res.end();
+        }
+        const body = await appcast(req, url.searchParams.get("key") ?? "");
+        res.writeHead(200, { ...SECURITY_HEADERS, "Content-Type": "application/rss+xml; charset=utf-8", "Cache-Control": "no-store" });
+        return res.end(req.method === "HEAD" ? undefined : body);
+      }
       if (pathname === "/buy") {
         if (!config.checkoutUrl) return sendHtmlError(res, 503, "Checkout is temporarily unavailable", "Please try again in a few minutes.");
         res.writeHead(302, { ...SECURITY_HEADERS, Location: config.checkoutUrl, "Cache-Control": "no-store" });
@@ -324,6 +419,43 @@ export function createHandler(config, { fetch = globalThis.fetch, now = () => Da
       else res.destroy();
     }
   };
+}
+
+// The site's own address as the client reached it (Coolify's proxy forwards the original scheme and host).
+function publicOrigin(req) {
+  const forwarded = (name) => String(req.headers[name] ?? "").split(",")[0].trim();
+  const proto = forwarded("x-forwarded-proto") || (req.socket.encrypted ? "https" : "http");
+  const host = forwarded("x-forwarded-host") || req.headers.host || "localhost";
+  return `${proto === "https" ? "https" : "http"}://${/^[A-Za-z0-9.:-]+$/.test(host) ? host : "localhost"}`;
+}
+
+function xml(text) {
+  return String(text).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[c]);
+}
+
+// Just enough Markdown for release notes: paragraphs, "- " lists, **bold**, *italic* and `code`.
+export function markdownToHtml(markdown) {
+  const inline = (text) =>
+    xml(text)
+      .replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")
+      .replace(/\*(.+?)\*/g, "<i>$1</i>")
+      .replace(/`(.+?)`/g, "<code>$1</code>");
+  const html = [];
+  let list = false;
+  for (const line of markdown.split("\n")) {
+    const item = /^\s*[-*]\s+(.*)$/.exec(line);
+    if (item) {
+      if (!list) html.push("<ul>");
+      list = true;
+      html.push(`<li>${inline(item[1])}</li>`);
+      continue;
+    }
+    if (list) html.push("</ul>");
+    list = false;
+    if (line.trim()) html.push(`<p>${inline(line.trim())}</p>`);
+  }
+  if (list) html.push("</ul>");
+  return html.join("\n").replaceAll("]]>", "]]&gt;");
 }
 
 // SpaceKit-0.2.0.dmg → "0.2.0"; null for names without a version.
