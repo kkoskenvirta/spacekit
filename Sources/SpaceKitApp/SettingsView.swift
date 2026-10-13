@@ -11,6 +11,7 @@ struct SettingsView: View {
             AutomationSettingsPane().tabItem { Label("Automation", systemImage: "clock.arrow.2.circlepath") }
             RulesSettingsPane().tabItem { Label("Rules", systemImage: "books.vertical") }
             ConfigFilePane().tabItem { Label("Config File", systemImage: "doc.text") }
+            UpdatesSettingsPane().tabItem { Label("Updates", systemImage: "arrow.down.circle") }
         }
         .frame(width: 620, height: 520)
     }
@@ -315,5 +316,62 @@ private struct ConfigFilePane: View {
             }
         }
         .padding(20)
+    }
+}
+
+/// Update checks and the purchase key that downloads updates from spacekit.studio.
+private struct UpdatesSettingsPane: View {
+    @Environment(UpdateController.self) private var updates
+    @State private var keyText = ""
+    @State private var keyProblem: String?
+
+    var body: some View {
+        @Bindable var updates = updates
+        Form {
+            Section("Updates") {
+                LabeledContent("This version", value: updates.currentVersion ?? "Development build")
+                Toggle("Check for updates automatically", isOn: $updates.checksAutomatically)
+                Text("Once a day SpaceKit asks spacekit.studio for the newest version number. It sends nothing but its own version.")
+                    .font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Button("Check Now") { Task { await updates.check(userInitiated: true) } }
+                        .disabled(updates.isChecking || updates.currentVersion == nil)
+                    if updates.isChecking { ProgressView().controlSize(.small) }
+                    Spacer()
+                    if let release = updates.available {
+                        Button("Download \(release.version)") { updates.download() }.buttonStyle(.borderedProminent)
+                    } else if let checked = updates.lastChecked {
+                        Text("Last checked \(checked.formatted(.relative(presentation: .named)))").font(.caption).foregroundStyle(
+                            .secondary)
+                    }
+                }
+            }
+            Section("Purchase") {
+                TextField("Purchase key", text: $keyText, prompt: Text("cs_live_… or your download page link"))
+                    .onAppear { keyText = updates.purchaseKey ?? "" }
+                    .onSubmit(saveKey)
+                    .textFieldStyle(.roundedBorder)
+                if let keyProblem {
+                    Text(keyProblem).font(.caption).foregroundStyle(Theme.critical)
+                }
+                HStack {
+                    Button("Save") { saveKey() }
+                    if updates.purchaseKey != nil {
+                        Label("Linked: updates download straight away", systemImage: "checkmark.seal.fill")
+                            .font(.caption).foregroundStyle(Theme.good)
+                    }
+                }
+                Text(
+                    "Your purchase key is on the download page you got after buying SpaceKit: click Link to SpaceKit there, or paste the page's address here. Lost it? Email support with your receipt."
+                )
+                .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    private func saveKey() {
+        keyProblem = updates.setPurchaseKey(from: keyText) ? nil : "That isn't a purchase key or a download page link."
+        if keyProblem == nil { keyText = updates.purchaseKey ?? "" }
     }
 }

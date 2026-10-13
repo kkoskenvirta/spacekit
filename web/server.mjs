@@ -100,7 +100,8 @@ export function createHandler(config, { fetch = globalThis.fetch, now = () => Da
     }
   }
 
-  // The installer customers get: INSTALLER_FILE if set, otherwise the newest .pkg (or .dmg) uploaded.
+  // The installer customers get: INSTALLER_FILE if set, otherwise the highest version uploaded
+  // (SpaceKit-<version>.pkg or .dmg; the .pkg when both exist), with the newest upload breaking ties.
   async function findInstaller() {
     let names;
     try {
@@ -113,18 +114,48 @@ export function createHandler(config, { fetch = globalThis.fetch, now = () => Da
       if (name.includes("/") || name.startsWith(".") || ![".pkg", ".dmg"].includes(extname(name))) continue;
       try {
         const info = await stat(join(config.downloadsDir, name));
-        if (info.isFile()) candidates.push({ name, path: join(config.downloadsDir, name), size: info.size, mtime: info.mtimeMs });
+        if (info.isFile()) {
+          candidates.push({ name, path: join(config.downloadsDir, name), size: info.size, mtime: info.mtimeMs, version: installerVersion(name) });
+        }
       } catch {}
     }
     const rank = (file) => (extname(file.name) === ".pkg" ? 1 : 0);
-    candidates.sort((a, b) => rank(b) - rank(a) || b.mtime - a.mtime);
+    candidates.sort((a, b) => compareVersions(b.version, a.version) || rank(b) - rank(a) || b.mtime - a.mtime);
     return candidates[0] ?? null;
+  }
+
+  // Release notes uploaded next to an installer, as SpaceKit-<version>.notes.md.
+  async function releaseNotes(version) {
+    if (!version) return null;
+    try {
+      const notes = await readFile(join(config.downloadsDir, `SpaceKit-${version}.notes.md`), "utf8");
+      return notes.trim().slice(0, 8000) || null;
+    } catch {
+      return null;
+    }
+  }
+
+  // What the app's update check reads. Public: it says which version exists, not how to download it.
+  async function latestRelease() {
+    const installer = await findInstaller();
+    if (!installer?.version) return [503, { status: "unavailable", message: "No release is available right now." }];
+    return [
+      200,
+      {
+        version: installer.version,
+        size: installer.size,
+        published_at: new Date(installer.mtime).toISOString(),
+        minimum_system_version: "15.0",
+        notes: await releaseNotes(installer.version),
+        download_page: "/update",
+      },
+    ];
   }
 
   async function claim(sessionId) {
     if (!SESSION_ID.test(sessionId)) return [400, { status: "invalid", message: "That isn't a valid purchase link." }];
     const cached = claims.get(sessionId);
-    if (cached && cached.until > now()) return [200, { ...cached.body, download_url: `/download/${issueToken(sessionId)}` }];
+    if (cached && cached.until > now()) return ready(sessionId, cached.email);
     if (!config.stripeKey || config.downloadSecret.length < 32) {
       return [503, { status: "unavailable", message: "Downloads are temporarily unavailable." }];
     }
@@ -163,14 +194,20 @@ export function createHandler(config, { fetch = globalThis.fetch, now = () => Da
       return [202, { status: "processing", message: "Your payment is being processed. You'll get an email receipt from Stripe once it clears; come back to this page then." }];
     }
 
+    const email = session.customer_details?.email ?? null;
+    claims.set(sessionId, { until: now() + 60 * 60 * 1000, email });
+    log(`claim ${sessionId}: paid`);
+    return ready(sessionId, email);
+  }
+
+  // A paid purchase's answer: the current installer and a fresh link to it.
+  async function ready(sessionId, email) {
     const installer = await findInstaller();
     if (!installer) {
       log(`claim ${sessionId}: paid, but no installer in ${config.downloadsDir}`);
       return [503, { status: "unavailable", message: "Your payment went through, but the download isn't ready yet. Keep this page's address and try again shortly." }];
     }
-    const body = { status: "ready", email: session.customer_details?.email ?? null, file: installer.name, size: installer.size };
-    claims.set(sessionId, { until: now() + 60 * 60 * 1000, body });
-    log(`claim ${sessionId}: paid, download issued`);
+    const body = { status: "ready", email, file: installer.name, version: installer.version, size: installer.size };
     return [200, { ...body, download_url: `/download/${issueToken(sessionId)}` }];
   }
 
@@ -198,6 +235,7 @@ export function createHandler(config, { fetch = globalThis.fetch, now = () => Da
       "/terms": "terms.html",
       "/privacy": "privacy.html",
       "/refunds": "refunds.html",
+      "/update": "update.html",
     };
     const file = routes[pathname] ?? pathname.slice(1);
     const resolved = normalize(join(PUBLIC_DIR, file));
@@ -255,6 +293,15 @@ export function createHandler(config, { fetch = globalThis.fetch, now = () => Da
       if (pathname === "/healthz") {
         return sendJson(res, 200, { ok: true, installer: (await findInstaller())?.name ?? null });
       }
+      if (pathname === "/api/updates/latest") {
+        const [status, body] = await latestRelease();
+        res.writeHead(status, {
+          ...SECURITY_HEADERS,
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": status === 200 ? "public, max-age=300" : "no-store",
+        });
+        return res.end(req.method === "HEAD" ? undefined : JSON.stringify(body));
+      }
       if (pathname === "/buy") {
         if (!config.checkoutUrl) return sendHtmlError(res, 503, "Checkout is temporarily unavailable", "Please try again in a few minutes.");
         res.writeHead(302, { ...SECURITY_HEADERS, Location: config.checkoutUrl, "Cache-Control": "no-store" });
@@ -277,6 +324,23 @@ export function createHandler(config, { fetch = globalThis.fetch, now = () => Da
       else res.destroy();
     }
   };
+}
+
+// SpaceKit-0.2.0.dmg → "0.2.0"; null for names without a version.
+export function installerVersion(name) {
+  return /^SpaceKit-(\d+(?:\.\d+){0,3})\.(?:pkg|dmg)$/.exec(name)?.[1] ?? null;
+}
+
+// Orders dotted versions number by number (0.10.0 after 0.9.1); a missing version sorts first.
+export function compareVersions(a, b) {
+  if (!a || !b) return (a ? 1 : 0) - (b ? 1 : 0);
+  const x = a.split(".").map(Number);
+  const y = b.split(".").map(Number);
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    const d = (x[i] ?? 0) - (y[i] ?? 0);
+    if (d) return d;
+  }
+  return 0;
 }
 
 // Replaces {{NAME}} with the (HTML-escaped) seller detail of that name.

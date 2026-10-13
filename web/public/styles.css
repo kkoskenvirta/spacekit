@@ -2049,3 +2049,96 @@ footer {
 .price-card .tagline a {
   color: var(--text);
 }
+
+/* Purchase key and the update page */
+
+.purchase-key {
+  margin-top: 26px;
+  padding: 16px;
+  border-radius: 10px;
+  background: #0a0b0e;
+  border: 1px solid var(--border);
+}
+
+.purchase-key-label {
+  font: 12px var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-3);
+  margin-bottom: 10px;
+}
+
+.purchase-key-label span {
+  text-transform: none;
+  letter-spacing: 0;
+  margin-left: 6px;
+}
+
+.key-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.key-row code {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  color: var(--text);
+}
+
+.key-row .copy,
+.key-form input {
+  font: 13px var(--mono);
+}
+
+.key-row .copy {
+  padding: 5px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border-strong);
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+.key-row .copy:hover {
+  color: var(--text);
+}
+
+.steps a,
+.thanks-card .hint a {
+  color: var(--brand-hi);
+}
+
+.key-form {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.key-form input {
+  flex: 1 1 260px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  background: #0a0b0e;
+  color: var(--text);
+}
+
+.thanks-card .key-form .button {
+  width: auto;
+}
+
+.key-error {
+  margin-top: 12px;
+  color: var(--critical) !important;
+  font-size: 14px;
+}
+
+.thanks-card .hint {
+  margin-top: 18px;
+  font-size: 13.5px;
+}

@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 
-import { createHandler, loadConfig } from "../server.mjs";
+import { compareVersions, createHandler, installerVersion, loadConfig } from "../server.mjs";
 
 const PAID = "cs_test_a1PaidSession0000000000";
 const UNPAID = "cs_test_a1OpenSession0000000000";
@@ -169,4 +169,72 @@ test("download links stop working after their TTL", async () => {
 test("healthz reports the installer it would serve", async () => {
   const body = await (await fetch(`${base}/healthz`)).json();
   assert.deepEqual(body, { ok: true, installer: "SpaceKit-0.1.0.pkg" });
+});
+
+test("installer names give versions that order number by number", () => {
+  assert.equal(installerVersion("SpaceKit-0.2.0.dmg"), "0.2.0");
+  assert.equal(installerVersion("SpaceKit-1.10.pkg"), "1.10");
+  assert.equal(installerVersion("SpaceKit.dmg"), null);
+  assert.equal(installerVersion("SpaceKit-0.2.0.notes.md"), null);
+  assert.ok(compareVersions("0.10.0", "0.9.1") > 0);
+  assert.equal(compareVersions("1.0", "1.0.0"), 0);
+  assert.ok(compareVersions("0.1.0", null) > 0);
+});
+
+test("the newest version is served, with its notes, to the update check and to buyers", async () => {
+  const downloads = await mkdtemp(join(tmpdir(), "spacekit-web-"));
+  await writeFile(join(downloads, "SpaceKit-0.10.0.dmg"), "new");
+  await writeFile(join(downloads, "SpaceKit-0.9.0.pkg"), "old but uploaded later");
+  await writeFile(join(downloads, "SpaceKit-0.10.0.notes.md"), "- Updates inside the app\n");
+  const { config } = loadConfig({
+    STRIPE_SECRET_KEY: "rk_test_key",
+    STRIPE_PAYMENT_LINK_ID: "plink_spacekit",
+    DOWNLOAD_SECRET: "z".repeat(40),
+    DOWNLOADS_DIR: downloads,
+  });
+  const local = createServer(createHandler(config, { fetch: fakeStripe, log: () => {} }));
+  await new Promise((resolve) => local.listen(0, resolve));
+  const url = `http://127.0.0.1:${local.address().port}`;
+  try {
+    const res = await fetch(`${url}/api/updates/latest`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("cache-control"), /max-age=300/);
+    const latest = await res.json();
+    assert.equal(latest.version, "0.10.0");
+    assert.equal(latest.notes, "- Updates inside the app");
+    assert.equal(latest.download_page, "/update");
+    assert.equal(latest.minimum_system_version, "15.0");
+
+    const claimed = await (await fetch(`${url}/api/claim?session_id=${PAID}`)).json();
+    assert.equal(claimed.version, "0.10.0");
+    assert.equal(claimed.file, "SpaceKit-0.10.0.dmg");
+    assert.equal(await (await fetch(url + claimed.download_url)).text(), "new");
+
+    // A newer upload is picked up even while the purchase is cached.
+    await writeFile(join(downloads, "SpaceKit-0.11.0.dmg"), "newer");
+    const again = await (await fetch(`${url}/api/claim?session_id=${PAID}`)).json();
+    assert.equal(again.version, "0.11.0");
+    assert.equal(await (await fetch(url + again.download_url)).text(), "newer");
+  } finally {
+    local.close();
+  }
+});
+
+test("the update check says so when there is no release", async () => {
+  const downloads = await mkdtemp(join(tmpdir(), "spacekit-web-"));
+  const { config } = loadConfig({ DOWNLOAD_SECRET: "z".repeat(40), DOWNLOADS_DIR: downloads });
+  const local = createServer(createHandler(config, { fetch: fakeStripe, log: () => {} }));
+  await new Promise((resolve) => local.listen(0, resolve));
+  try {
+    const res = await fetch(`http://127.0.0.1:${local.address().port}/api/updates/latest`);
+    assert.equal(res.status, 503);
+  } finally {
+    local.close();
+  }
+});
+
+test("the update page is served", async () => {
+  const res = await fetch(`${base}/update`);
+  assert.equal(res.status, 200);
+  assert.match(await res.text(), /Update SpaceKit/);
 });

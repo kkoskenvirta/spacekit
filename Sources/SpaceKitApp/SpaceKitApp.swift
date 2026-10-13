@@ -6,15 +6,27 @@ import SwiftUI
 struct SpaceKitApp: App {
     @NSApplicationDelegateAdaptor private var delegate: AppDelegate
     @State private var model = AppModel()
+    @State private var updates: UpdateController
+
+    init() {
+        let updates = UpdateController()
+        _updates = State(initialValue: updates)
+        AppDelegate.updates = updates
+    }
 
     var body: some Scene {
         Window("SpaceKit", id: "main") {
             RootView()
                 .environment(model)
+                .environment(updates)
                 .frame(minWidth: 1040, minHeight: 680)
         }
         .defaultSize(width: 1320, height: 860)
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") { Task { await updates.check(userInitiated: true) } }
+                    .disabled(updates.isChecking)
+            }
             CommandGroup(after: .newItem) {
                 Button("Scan Startup Disk") { model.scan("/") }.keyboardShortcut("1", modifiers: [.command, .shift])
                 Button("Scan Home Folder") { model.scan("~") }.keyboardShortcut("h", modifiers: [.command, .shift])
@@ -38,11 +50,11 @@ struct SpaceKitApp: App {
         }
 
         Settings {
-            SettingsView().environment(model)
+            SettingsView().environment(model).environment(updates)
         }
 
         MenuBarExtra {
-            MenuBarContent().environment(model)
+            MenuBarContent().environment(model).environment(updates)
         } label: {
             Image(systemName: "internaldrive")
         }
@@ -54,6 +66,13 @@ struct SpaceKitApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The app's model, so quitting can wait for a cleanup in progress.
     static weak var model: AppModel?
+    static weak var updates: UpdateController?
+
+    /// `spacekit://activate?key=…` links from the website's download page.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls { AppDelegate.updates?.handle(url) }
+        NSApp.activate()
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // When launched from `swift run` (no bundle), become a regular foreground app with a Dock icon.
@@ -81,15 +100,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 struct RootView: View {
     @Environment(AppModel.self) private var model
+    @Environment(UpdateController.self) private var updates
 
     var body: some View {
         @Bindable var model = model
+        @Bindable var updates = updates
         NavigationSplitView {
             SidebarView()
                 .navigationSplitViewColumnWidth(min: 220, ideal: 240, max: 300)
         } detail: {
             VStack(spacing: 0) {
                 if let error = model.configError { ConfigErrorBanner(error: error) }
+                if let release = updates.available { UpdateBanner(release: release) }
                 Group {
                     switch model.section {
                     case .explore: ExploreView()
@@ -120,12 +142,67 @@ struct RootView: View {
         } message: {
             Text(model.errorMessage ?? "")
         }
+        .background {
+            // Answers to "Check for Updates…" and spacekit:// links; on a background view so it doesn't
+            // share a modifier with the alert above.
+            Color.clear.alert(
+                "SpaceKit Updates", isPresented: Binding(get: { updates.message != nil }, set: { if !$0 { updates.message = nil } })
+            ) {
+                Button("OK") { updates.message = nil }
+            } message: {
+                Text(updates.message ?? "")
+            }
+        }
         .task {
             #if DEBUG
                 DebugAutomation.start(model: model)
             #endif
             if model.tree == nil && !model.showOnboarding { model.scan() }
+            updates.start()
         }
+    }
+}
+
+/// Shown above every section while a newer SpaceKit is available.
+struct UpdateBanner: View {
+    @Environment(UpdateController.self) private var updates
+    let release: ReleaseInfo
+    @State private var showingNotes = false
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Image(systemName: "arrow.down.circle.fill").foregroundStyle(Theme.categorical(0))
+            VStack(alignment: .leading, spacing: 2) {
+                Text("SpaceKit \(release.version) is available").font(.callout.weight(.semibold))
+                Text(
+                    updates.purchaseKey == nil
+                        ? "You have \(updates.currentVersion ?? "an older version"). Download it with your purchase key, from your download page."
+                        : "You have \(updates.currentVersion ?? "an older version"). It's free for you: your purchase is linked."
+                )
+                .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            if let notes = release.notes, !notes.isEmpty {
+                Button("What's New") { showingNotes = true }
+                    .popover(isPresented: $showingNotes, arrowEdge: .bottom) {
+                        ScrollView {
+                            Text(
+                                (try? AttributedString(markdown: notes, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+                                    ?? AttributedString(notes)
+                            )
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(16)
+                        }
+                        .frame(width: 420, height: 300)
+                    }
+            }
+            Button("Skip This Version") { updates.skip() }
+            Button("Later") { updates.dismiss() }
+            Button("Download") { updates.download() }.buttonStyle(.borderedProminent)
+        }
+        .padding(10)
+        .background(Theme.categorical(0).opacity(0.12))
     }
 }
 
@@ -297,6 +374,7 @@ struct CleanupListPopover: View {
 /// Compact status in the menu bar: free space, next job, pending suggestions.
 struct MenuBarContent: View {
     @Environment(AppModel.self) private var model
+    @Environment(UpdateController.self) private var updates
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -310,7 +388,16 @@ struct MenuBarContent: View {
                 Label("Next: \(next.job.name), \(next.date.relativeDescription())", systemImage: "clock").font(.callout)
             }
             if model.recovered90Days > 0 {
-                Label("Recovered \(model.recovered90Days.formattedBytes) in 3 months", systemImage: "arrow.uturn.backward.circle").font(.callout)
+                Label("Recovered \(model.recovered90Days.formattedBytes) in 3 months", systemImage: "arrow.uturn.backward.circle").font(
+                    .callout)
+            }
+            if let release = updates.available {
+                Button {
+                    updates.download()
+                } label: {
+                    Label("SpaceKit \(release.version) is available", systemImage: "arrow.down.circle")
+                }
+                .buttonStyle(.link)
             }
             if !model.suggestions.isEmpty {
                 Button {

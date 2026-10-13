@@ -67,6 +67,13 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSHumanReadableCopyright</key><string>Open source under the MIT License.</string>
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key><string>dev.spacekit.app</string>
+      <key>CFBundleURLSchemes</key><array><string>spacekit</string></array>
+    </dict>
+  </array>
 </dict>
 </plist>
 PLIST

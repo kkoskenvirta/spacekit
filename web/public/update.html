@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Update SpaceKit</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/thanks.js" defer></script>
+</head>
+<body class="page-thanks" data-page="update">
+  <main class="thanks-card">
+    <a class="brand" href="/"><img src="/favicon.svg" alt="" width="28" height="28">SpaceKit</a>
+
+    <div id="state-ask" hidden>
+      <h1>Update SpaceKit</h1>
+      <p>Updates are free for everyone who bought SpaceKit. Paste your purchase key, or the address of the download page you got after buying.</p>
+      <form id="key-form" class="key-form">
+        <input id="key-input" type="text" autocomplete="off" spellcheck="false" placeholder="cs_live_… or https://spacekit.studio/thanks?session_id=…" aria-label="Purchase key">
+        <button class="button button-primary" type="submit">Continue</button>
+      </form>
+      <p class="key-error" id="key-error" hidden>That doesn’t look like a purchase key. It starts with <code>cs_live_</code>.</p>
+      <p class="hint">Can’t find it? Email <a href="mailto:{{SUPPORT_EMAIL}}?subject=SpaceKit%20purchase%20key">{{SUPPORT_EMAIL}}</a> with your Stripe receipt and we’ll send it to you.</p>
+    </div>
+
+    <div id="state-loading" hidden>
+      <h1>Finding your purchase…</h1>
+      <div class="status-row"><span class="spinner"></span><span id="loading-text">This takes a second.</span></div>
+    </div>
+
+    <div id="state-ready" hidden>
+      <h1 id="ready-title">The latest SpaceKit is ready</h1>
+      <p>Free for you as a SpaceKit owner<span id="ready-email"></span>.</p>
+      <a class="button button-primary button-lg" id="download" href="#">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>
+        Download SpaceKit
+      </a>
+      <div class="file-meta" id="file-meta"></div>
+      <ol class="steps">
+        <li><span>Quit SpaceKit if it’s running.</span></li>
+        <li><span id="step-install">Open the downloaded <b>SpaceKit installer</b> and follow the steps. It replaces the old version.</span></li>
+        <li><span>Open SpaceKit again. Your settings, cleanup jobs, history and journal are kept. If updates aren’t linked yet, click <a id="link-app" href="#">Link to SpaceKit</a>.</span></li>
+      </ol>
+      <div class="purchase-key">
+        <div class="purchase-key-label">Your purchase key</div>
+        <div class="key-row"><code id="purchase-key"></code><button type="button" class="copy" id="copy-key">Copy</button></div>
+      </div>
+    </div>
+
+    <div id="state-error" hidden>
+      <h1 id="error-title">We couldn’t find that purchase</h1>
+      <p id="error-text">Something went wrong.</p>
+      <a class="button button-ghost" id="error-action" href="/update">Try another key</a>
+    </div>
+
+    <nav class="thanks-links" aria-label="Help">
+      <a href="mailto:{{SUPPORT_EMAIL}}">Need help? {{SUPPORT_EMAIL}}</a>
+      <a href="/">spacekit.studio</a>
+      <a href="/terms">Terms</a>
+      <a href="/privacy">Privacy</a>
+    </nav>
+  </main>
+</body>
+</html>

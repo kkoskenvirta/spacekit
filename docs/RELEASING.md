@@ -33,7 +33,8 @@ by Apple.
 
 ## Each release
 
-1. Bump `static let version` in `Sources/SpaceKitCLI/SpaceKitCommand.swift`.
+1. Bump `static let version` in `Sources/SpaceKitCLI/SpaceKitCommand.swift`, and write what changed in
+   `docs/releases/<version>.md` (short Markdown; the app shows it under *What's New*).
 2. Build, sign, notarize and staple:
 
    ```sh
@@ -56,7 +57,22 @@ by Apple.
    DEPLOY_TARGET=root@<server>:<downloads folder> scripts/publish-installer.sh
    ```
 
-   The site immediately serves the newest `.pkg` in that folder. Setup: [web/README.md](../web/README.md).
+   It uploads the installer and the release notes. The site immediately serves the highest version in
+   that folder, to new buyers and as an update. Setup: [web/README.md](../web/README.md).
+
+## How updates reach buyers
+
+- About once a day (Settings → Updates can turn it off), the app asks `GET /api/updates/latest`, which
+  answers with the highest version on the server, its size and release notes. It's public: it says what
+  exists, not how to download it.
+- When that's newer than the running copy, the app shows a banner. **Download** opens
+  `https://spacekit.studio/update?session_id=<purchase key>`, which checks the purchase with Stripe and
+  hands out the newest installer, exactly like the download page after buying.
+- The purchase key is the buyer's Stripe Checkout Session id. The download page shows it, with a
+  *Link to SpaceKit* button (`spacekit://activate?key=…`) that stores it in the app; it can also be pasted
+  in Settings → Updates. Without a key, Download opens `/update`, which asks for it.
+- Copies older than 0.2.0 have no update check: those buyers get the new version from the download page
+  they bookmarked (it always serves the newest installer), or from `/update` with their key.
 
 ## What the installer does
 

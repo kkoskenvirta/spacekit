@@ -9,7 +9,7 @@
   <link rel="stylesheet" href="/styles.css">
   <script src="/thanks.js" defer></script>
 </head>
-<body class="page-thanks">
+<body class="page-thanks" data-page="thanks">
   <main class="thanks-card">
     <a class="brand" href="/"><img src="/favicon.svg" alt="" width="28" height="28">SpaceKit</a>
 
@@ -29,8 +29,13 @@
       <ol class="steps">
         <li><span id="step-install">Open the downloaded <b>SpaceKit installer</b> and follow the steps. It installs the app and the <code>spacekit</code> command-line tool.</span></li>
         <li><span>Open <b>SpaceKit</b> from Applications. For complete results, allow <b>Full Disk Access</b> in System Settings → Privacy &amp; Security.</span></li>
+        <li><span><b>Turn on updates:</b> with SpaceKit installed, click <a id="link-app" href="#">Link to SpaceKit</a>. SpaceKit then downloads new versions for you, free.</span></li>
         <li><span>Go to <b>Automation</b>, create your first cleanup job and install the background agent. Done: your disk now looks after itself.</span></li>
       </ol>
+      <div class="purchase-key">
+        <div class="purchase-key-label">Your purchase key <span>for updates and re-downloads, keep it somewhere safe</span></div>
+        <div class="key-row"><code id="purchase-key"></code><button type="button" class="copy" id="copy-key">Copy</button></div>
+      </div>
     </div>
 
     <div id="state-error" hidden>
