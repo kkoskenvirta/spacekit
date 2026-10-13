@@ -76,9 +76,9 @@ final class UpdateController {
     func handle(_ url: URL) {
         guard url.scheme == "spacekit", url.host() == "activate" else { return }
         if setPurchaseKey(from: url.absoluteString) {
-            message = "Your purchase is linked. SpaceKit installs updates for you from now on."
+            message = "Your license is linked. SpaceKit installs updates for you from now on."
         } else {
-            message = "That link doesn't contain a valid purchase key."
+            message = "That link doesn't contain a valid license key."
         }
     }
 }

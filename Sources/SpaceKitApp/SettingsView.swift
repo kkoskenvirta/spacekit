@@ -319,7 +319,7 @@ private struct ConfigFilePane: View {
     }
 }
 
-/// Sparkle's update settings and the purchase key that unlocks updates from spacekit.studio.
+/// Sparkle's update settings and the license key that unlocks updates from spacekit.studio.
 private struct UpdatesSettingsPane: View {
     @Environment(UpdateController.self) private var updates
     @State private var keyText = ""
@@ -347,8 +347,8 @@ private struct UpdatesSettingsPane: View {
                     }
                 }
             }
-            Section("Purchase") {
-                TextField("Purchase key", text: $keyText, prompt: Text("cs_live_… or your download page link"))
+            Section("License") {
+                TextField("License key", text: $keyText, prompt: Text("cs_live_… or your download page link"))
                     .onAppear { keyText = updates.purchaseKey ?? "" }
                     .onSubmit(saveKey)
                     .textFieldStyle(.roundedBorder)
@@ -365,7 +365,7 @@ private struct UpdatesSettingsPane: View {
                     Button("Download Page") { updates.openDownloadPage() }
                 }
                 Text(
-                    "Updates are free. Your purchase key is on the download page you got after buying SpaceKit: click Link to SpaceKit there, or paste the page's address here. Lost it? Email support with your receipt."
+                    "Updates are free. Your license key is on the download page you got after buying SpaceKit, and in the license file you saved from it: click Link to SpaceKit there, or paste the key or the page's address here. Lost it? Email support with your receipt."
                 )
                 .font(.caption).foregroundStyle(.secondary)
             }
@@ -374,7 +374,7 @@ private struct UpdatesSettingsPane: View {
     }
 
     private func saveKey() {
-        keyProblem = updates.setPurchaseKey(from: keyText) ? nil : "That isn't a purchase key or a download page link."
+        keyProblem = updates.setPurchaseKey(from: keyText) ? nil : "That isn't a license key or a download page link."
         if keyProblem == nil { keyText = updates.purchaseKey ?? "" }
     }
 }

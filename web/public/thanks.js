@@ -43,20 +43,78 @@ function showReady(body) {
   }
   if (body.email) document.getElementById("ready-email").textContent = `, ${body.email}`;
 
-  // The purchase key, and the link that stores it in the app (spacekit://activate).
+  // The license key (the Stripe Checkout Session id), and the link that stores it in the app.
   document.getElementById("purchase-key").textContent = sessionId;
   document.getElementById("link-app").href = `spacekit://activate?key=${encodeURIComponent(sessionId)}`;
-  const copy = document.getElementById("copy-key");
-  copy.addEventListener("click", async () => {
-    try {
-      await navigator.clipboard.writeText(sessionId);
-      copy.textContent = "Copied ✓";
-    } catch {
-      copy.textContent = "Select & copy";
-    }
-    setTimeout(() => (copy.textContent = "Copy"), 1800);
+  const downloadLink = `${location.origin}/thanks?session_id=${encodeURIComponent(sessionId)}`;
+  copyButton("copy-key", () => sessionId, "Key copied");
+  copyButton("copy-link", () => downloadLink, "Link copied");
+  document.getElementById("save-key").addEventListener("click", (event) => {
+    const file = new Blob([licenseFile(sessionId, downloadLink, body)], { type: "text/plain;charset=utf-8" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(file);
+    link.download = "SpaceKit license key.txt";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+    flash(event.currentTarget, "Saved");
   });
   show("ready");
+}
+
+// A button that copies text, confirming in its own label.
+function copyButton(id, text, done) {
+  const button = document.getElementById(id);
+  button.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(text());
+      flash(button, done);
+    } catch {
+      flash(button, "Select it and copy", false);
+    }
+  });
+}
+
+function flash(button, text, ok = true) {
+  const label = button.querySelector("span");
+  const original = label.dataset.original ?? label.textContent;
+  label.dataset.original = original;
+  label.textContent = ok ? `${text} ✓` : text;
+  button.classList.toggle("done", ok);
+  clearTimeout(button.resetTimer);
+  button.resetTimer = setTimeout(() => {
+    label.textContent = original;
+    button.classList.remove("done");
+  }, 2000);
+}
+
+// The text file "Download as .txt" saves.
+function licenseFile(key, downloadLink, body) {
+  const support = document.body.dataset.support;
+  return [
+    "SpaceKit license key",
+    "====================",
+    "",
+    `License key:   ${key}`,
+    `Download link: ${downloadLink}`,
+    body.email ? `Bought with:   ${body.email}` : null,
+    `Saved:         ${new Date().toISOString().slice(0, 10)}`,
+    "",
+    "Keep this file somewhere safe and private. Your license key gives you:",
+    "",
+    "- Free updates. In SpaceKit, open Settings → Updates and paste the key, or open",
+    "  the download link above and click \"Link to SpaceKit\". SpaceKit then installs",
+    "  new versions itself.",
+    "- Downloads of SpaceKit any time, for example on a new Mac: open the download",
+    "  link above, or paste the key at https://spacekit.studio/update.",
+    "",
+    "Anyone with this key can download your copy of SpaceKit, so don't share it.",
+    support ? `Questions: ${support}` : null,
+    "",
+  ]
+    .filter((line) => line !== null)
+    .join("\n");
 }
 
 async function claim(attempt = 0) {

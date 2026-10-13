@@ -77,14 +77,15 @@ by Apple.
 SpaceKit 0.3.0 and later update themselves with [Sparkle](https://sparkle-project.org):
 
 - About once a day (Settings → Updates can turn it off), Sparkle reads `https://spacekit.studio/appcast.xml`,
-  adding `?key=<purchase key>` when the buyer linked their purchase. The appcast always names the newest
+  adding `?key=<license key>` when the buyer linked their purchase. The appcast always names the newest
   version. For a key Stripe confirms as paid, it includes a signed download link to the DMG (valid for a
   week) and the DMG's Sparkle signature; Sparkle shows the release notes, downloads, checks that the
   signature matches `SUPublicEDKey` and that the app is signed by the same Developer ID, replaces the app
   and relaunches it. Without a valid key, the update is informational: *Learn More* opens `/update`.
 - `scripts/publish-installer.sh` signs the DMG (`sign_update`) and uploads the signature as
   `SpaceKit-<version>.dmg.sig`. Without that file the appcast never offers the download.
-- The purchase key is the buyer's Stripe Checkout Session id. The download page shows it, with a
+- The license key is the buyer's Stripe Checkout Session id. The download page shows it, with *Copy key*,
+  *Copy download link* and *Download as .txt* buttons and a
   *Link to SpaceKit* button (`spacekit://activate?key=…`) that stores it in the app; it can also be pasted
   in Settings → Updates.
 - SpaceKit 0.2.0 checked `GET /api/updates/latest` instead and sends buyers to `/update`, which still works.

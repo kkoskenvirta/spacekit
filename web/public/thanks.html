@@ -9,7 +9,7 @@
   <link rel="stylesheet" href="/styles.css">
   <script src="/thanks.js" defer></script>
 </head>
-<body class="page-thanks" data-page="thanks">
+<body class="page-thanks" data-page="thanks" data-support="{{SUPPORT_EMAIL}}">
   <main class="thanks-card">
     <a class="brand" href="/"><img src="/favicon.svg" alt="" width="28" height="28">SpaceKit</a>
 
@@ -20,22 +20,43 @@
 
     <div id="state-ready" hidden>
       <h1>You’re all set 🎉</h1>
-      <p>Thanks for buying SpaceKit<span id="ready-email"></span>. Your download is ready. Bookmark this page to download again later.</p>
+      <p>Thanks for buying SpaceKit<span id="ready-email"></span>. Your download is ready.</p>
       <a class="button button-primary button-lg" id="download" href="#">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>
         Download SpaceKit
       </a>
       <div class="file-meta" id="file-meta"></div>
+      <section class="license" aria-labelledby="license-title">
+        <div class="license-head">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="7.5" cy="15.5" r="4.5"/><path d="M10.7 12.3 21 2M16 7l3 3M19 4l2 2"/></svg>
+          <div>
+            <h2 id="license-title">Save your license key</h2>
+            <p>This is your SpaceKit license. It gets you <b>free updates</b> and lets you <b>download SpaceKit again</b> any time. Stripe’s receipt doesn’t include it, so save it now: copy it to your password manager or notes, or download it as a file.</p>
+          </div>
+        </div>
+        <div class="key-box"><code id="purchase-key"></code></div>
+        <div class="license-actions">
+          <button type="button" class="license-button" id="copy-key">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg>
+            <span>Copy key</span>
+          </button>
+          <button type="button" class="license-button" id="copy-link">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg>
+            <span>Copy download link</span>
+          </button>
+          <button type="button" class="license-button" id="save-key">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>
+            <span>Download as .txt</span>
+          </button>
+        </div>
+        <p class="license-note">Updating: paste the key in SpaceKit → Settings → Updates, or click <i>Link to SpaceKit</i> below. Lost SpaceKit? Open your download link, or paste the key at <a href="/update">spacekit.studio/update</a>. Keep it private: anyone with it can download your copy.</p>
+      </section>
       <ol class="steps">
         <li><span id="step-install">Open the downloaded <b>SpaceKit installer</b> and follow the steps. It installs the app and the <code>spacekit</code> command-line tool.</span></li>
         <li><span>Open <b>SpaceKit</b> from Applications. For complete results, allow <b>Full Disk Access</b> in System Settings → Privacy &amp; Security.</span></li>
-        <li><span><b>Turn on updates:</b> with SpaceKit installed, click <a id="link-app" href="#">Link to SpaceKit</a>. SpaceKit then installs new versions itself, free.</span></li>
+        <li><span><b>Turn on updates:</b> with SpaceKit installed, click <a id="link-app" href="#">Link to SpaceKit</a>. It stores your license key in the app, and SpaceKit then installs new versions itself, free.</span></li>
         <li><span>Go to <b>Automation</b>, create your first cleanup job and install the background agent. Done: your disk now looks after itself.</span></li>
       </ol>
-      <div class="purchase-key">
-        <div class="purchase-key-label">Your purchase key <span>for updates and re-downloads, keep it somewhere safe</span></div>
-        <div class="key-row"><code id="purchase-key"></code><button type="button" class="copy" id="copy-key">Copy</button></div>
-      </div>
     </div>
 
     <div id="state-error" hidden>
