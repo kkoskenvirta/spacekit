@@ -1,0 +1,18 @@
+#!/bin/sh
+# Runs as root after the macOS Installer copies SpaceKit.app. $2 is the install location (/Applications)
+# and $3 the target volume. Puts the bundled CLI on PATH as /usr/local/bin/spacekit, unless something
+# other than an earlier SpaceKit link already uses that name.
+CLI="$2/SpaceKit.app/Contents/Helpers/spacekit"
+BIN_DIR="${3%/}/usr/local/bin"
+LINK="$BIN_DIR/spacekit"
+
+[ -x "$CLI" ] || exit 0
+if [ -e "$LINK" ] || [ -L "$LINK" ]; then
+  case "$(readlink "$LINK" 2>/dev/null)" in
+    */SpaceKit.app/Contents/Helpers/spacekit) ;;
+    *) exit 0 ;;
+  esac
+fi
+mkdir -p "$BIN_DIR"
+ln -sf "$CLI" "$LINK"
+exit 0

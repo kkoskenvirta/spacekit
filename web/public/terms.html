@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Terms of Sale · SpaceKit</title>
+  <meta name="description" content="Terms of sale for SpaceKit, sold by {{BUSINESS_NAME}}.">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+<header class="nav">
+  <div class="container nav-inner">
+    <a class="brand" href="/"><img src="/favicon.svg" alt="" width="28" height="28">SpaceKit</a>
+    <a class="button button-primary" href="/buy">Buy · $5</a>
+  </div>
+</header>
+
+<main class="container legal">
+  <h1>Terms of Sale</h1>
+  <p class="updated">Last updated 13 October 2026</p>
+
+  <p class="summary"><strong>In short:</strong> you pay $5 once (plus any tax due where you live) and download SpaceKit straight away. If it isn’t right for you, email us within 14 days and we’ll refund you in full.</p>
+
+  <h2>1. Who sells SpaceKit</h2>
+  <p>SpaceKit is sold by:</p>
+  <div class="company">
+    <strong>{{BUSINESS_NAME}}</strong><br>
+    Business ID: {{BUSINESS_ID}}<br>
+    {{BUSINESS_ADDRESS}}<br>
+    Email: <a href="mailto:{{SUPPORT_EMAIL}}">{{SUPPORT_EMAIL}}</a>
+  </div>
+  <p>These terms apply to every purchase of SpaceKit made on this website. By completing a purchase you accept them.</p>
+
+  <h2>2. What you buy</h2>
+  <p>SpaceKit is a disk-space tool for macOS: a Mac app, a command-line tool and a terminal interface that find leftover developer and AI data and can clean it up, by hand or on a schedule you set. Your purchase includes the signed and notarized SpaceKit installer and access to download it from this website.</p>
+  <p>SpaceKit’s source code is published under the <a href="https://opensource.org/license/mit">MIT License</a>, which also applies to the copy you buy. What you pay for is the ready-to-install, signed and notarized build and its delivery.</p>
+  <p><strong>Requirements:</strong> a Mac with macOS 15 Sequoia or later (Apple silicon or Intel). For complete results, SpaceKit needs Full Disk Access, which you grant in System Settings.</p>
+
+  <h2>3. Price and payment</h2>
+  <p>The price is <strong>$5.00 (USD)</strong>, paid once. There is no subscription and nothing renews. Any sales tax or VAT due where you live is calculated and shown at checkout before you pay. Your bank may charge a currency-conversion fee if your card isn’t in US dollars.</p>
+  <p>Payments are processed by <a href="https://stripe.com">Stripe</a>. We never see or store your full card details.</p>
+
+  <h2>4. Delivery</h2>
+  <p>Right after payment you’re taken to a download page with the installer. Stripe also emails you a receipt. Keep the download page’s address (bookmark it) to download again later; if you lose it, email us with your receipt and we’ll send you a new link.</p>
+
+  <h2>5. Refunds and your right of withdrawal</h2>
+  <p>You can get a <strong>full refund within 14 days</strong> of your purchase, for any reason. Email <a href="mailto:{{SUPPORT_EMAIL}}">{{SUPPORT_EMAIL}}</a> from the address you bought with, or include your receipt. Details are in our <a href="/refunds">Refund Policy</a>.</p>
+  <p>If you are a consumer in the EU, this covers your statutory 14-day right of withdrawal: downloading SpaceKit doesn’t take that right away from you. Your other legal rights as a consumer, for example if the product is defective, are not affected by these terms.</p>
+
+  <h2>6. Using SpaceKit safely</h2>
+  <p>SpaceKit is designed to remove only data that its rules recognise, to move items to the Trash by default, to stay within the limits you set, and to refuse to touch your personal folders, system folders, credentials and git repositories. Even so, it removes files on your instructions and on the schedules you configure, so please review what a job will do before you turn on automatic mode, and keep backups of anything important (for example with Time Machine).</p>
+
+  <h2>7. Warranty and liability</h2>
+  <p>We want SpaceKit to work well for you; if it doesn’t, tell us, or ask for a refund within 14 days. Beyond the rights consumer law gives you, which we don’t limit, SpaceKit is provided as described on this website, without further promises, and our total liability for any claim relating to your purchase is limited to the amount you paid. Nothing in these terms limits liability that cannot be limited by law, such as for intent or gross negligence.</p>
+
+  <h2>8. Updates</h2>
+  <p>We may release updates to SpaceKit. Updates we publish for the version you bought are available to you through the same download page. We don’t promise any particular future features or updates.</p>
+
+  <h2>9. Governing law and disputes</h2>
+  <p>These terms are governed by the laws of Finland. If you are a consumer, you also keep the protection of the mandatory consumer laws of the country where you live.</p>
+  <p>If something goes wrong, please contact us first and we’ll do our best to sort it out. Consumers can also bring a dispute to the Finnish <a href="https://www.kuluttajariita.fi/en/">Consumer Disputes Board</a> (Kuluttajariitalautakunta), or to the courts of the place where they live.</p>
+
+  <h2>10. Changes</h2>
+  <p>We may update these terms. The version that applies to your purchase is the one shown here when you bought.</p>
+
+  <h2>11. Contact</h2>
+  <p>Questions about your purchase: <a href="mailto:{{SUPPORT_EMAIL}}">{{SUPPORT_EMAIL}}</a>. See also our <a href="/privacy">Privacy Policy</a>.</p>
+</main>
+
+<footer>
+  <div class="container footer-inner">
+    <a class="brand" href="/" style="font-size:14px"><img src="/favicon.svg" alt="" width="20" height="20">SpaceKit</a>
+    <span>© 2026 {{BUSINESS_NAME}}</span>
+    <nav aria-label="Footer">
+      <a href="/terms">Terms</a>
+      <a href="/privacy">Privacy</a>
+      <a href="/refunds">Refunds</a>
+      <a href="mailto:{{SUPPORT_EMAIL}}">Contact</a>
+    </nav>
+    <div class="footer-company">SpaceKit is sold by {{BUSINESS_NAME}} · Business ID {{BUSINESS_ID}} · {{BUSINESS_ADDRESS}} · <a href="mailto:{{SUPPORT_EMAIL}}">{{SUPPORT_EMAIL}}</a></div>
+  </div>
+</footer>
+
+</body>
+</html>

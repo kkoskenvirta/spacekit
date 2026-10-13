@@ -30,6 +30,8 @@ spacekit doctor     # checks permissions, config, rules and the background agent
 make uninstall      # removes them again; stops the background agent only if it runs this CLI, not the app's
 ```
 
+`make installer` builds the distributable `SpaceKit-<version>.pkg` and `.dmg`; signing, notarization and publishing are in **[docs/RELEASING.md](docs/RELEASING.md)**.
+
 For complete results, give **Full Disk Access** to SpaceKit (and to your terminal for the CLI and TUI): *System Settings → Privacy & Security → Full Disk Access*. Without it, macOS hides Mail, Messages and other apps' data; SpaceKit reports that space as *Hidden*.
 
 ## Command line

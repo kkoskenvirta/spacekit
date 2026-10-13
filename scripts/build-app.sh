@@ -4,6 +4,7 @@
 #
 #   scripts/build-app.sh            → build/SpaceKit.app (release, ad-hoc signed)
 #   SIGN_IDENTITY="Developer ID Application: …" scripts/build-app.sh
+#   ARCHS="arm64 x86_64" scripts/build-app.sh   → a universal app (needs Xcode, not just the Command Line Tools)
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -12,6 +13,10 @@ VERSION="${VERSION:-$(grep -m1 'static let version' Sources/SpaceKitCLI/SpaceKit
 CONFIGURATION="${CONFIGURATION:-release}"
 APP="$ROOT/build/SpaceKit.app"
 SIGN_IDENTITY="${SIGN_IDENTITY:--}"
+ARCH_FLAGS=()
+for arch in ${ARCHS:-}; do
+  ARCH_FLAGS+=(--arch "$arch")
+done
 if [ -z "${SDKROOT:-}" ]; then
   SDKROOT="$(scripts/swift-sdk.sh)"
 fi
@@ -19,10 +24,10 @@ if [ -n "$SDKROOT" ]; then
   export SDKROOT
 fi
 
-echo "→ Building SpaceKit $VERSION ($CONFIGURATION)"
-swift build -c "$CONFIGURATION" --product SpaceKitApp
-swift build -c "$CONFIGURATION" --product spacekit
-BIN="$(swift build -c "$CONFIGURATION" --show-bin-path)"
+echo "→ Building SpaceKit $VERSION ($CONFIGURATION${ARCHS:+, $ARCHS})"
+swift build -c "$CONFIGURATION" ${ARCH_FLAGS[@]+"${ARCH_FLAGS[@]}"} --product SpaceKitApp
+swift build -c "$CONFIGURATION" ${ARCH_FLAGS[@]+"${ARCH_FLAGS[@]}"} --product spacekit
+BIN="$(swift build -c "$CONFIGURATION" ${ARCH_FLAGS[@]+"${ARCH_FLAGS[@]}"} --show-bin-path)"
 
 echo "→ Assembling $APP"
 rm -rf "$APP"
@@ -67,8 +72,13 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 
 echo "→ Signing ($SIGN_IDENTITY)"
-codesign --force --options runtime --sign "$SIGN_IDENTITY" "$APP/Contents/Helpers/spacekit"
-codesign --force --options runtime --sign "$SIGN_IDENTITY" "$APP"
+# Notarization needs a secure timestamp; ad-hoc signatures can't have one.
+TIMESTAMP=()
+if [ "$SIGN_IDENTITY" != "-" ]; then
+  TIMESTAMP=(--timestamp)
+fi
+codesign --force --options runtime ${TIMESTAMP[@]+"${TIMESTAMP[@]}"} --sign "$SIGN_IDENTITY" "$APP/Contents/Helpers/spacekit"
+codesign --force --options runtime ${TIMESTAMP[@]+"${TIMESTAMP[@]}"} --sign "$SIGN_IDENTITY" "$APP"
 
 echo "✓ $APP"
 echo "  Open it:            open \"$APP\""

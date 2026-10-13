@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The macOS Installer's script for SpaceKit-<version>.pkg. scripts/build-installer.sh fills in the
+     @VERSION@ and @HOST_ARCHS@ placeholders. -->
+<installer-gui-script minSpecVersion="2">
+    <title>SpaceKit</title>
+    <organization>dev.spacekit</organization>
+    <welcome file="welcome.html" mime-type="text/html"/>
+    <license file="LICENSE.txt"/>
+    <conclusion file="conclusion.html" mime-type="text/html"/>
+    <options customize="never" require-scripts="false" rootVolumeOnly="true" hostArchitectures="@HOST_ARCHS@"/>
+    <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+    <volume-check>
+        <allowed-os-versions>
+            <os-version min="15.0"/>
+        </allowed-os-versions>
+    </volume-check>
+    <choices-outline>
+        <line choice="default">
+            <line choice="dev.spacekit.app"/>
+        </line>
+    </choices-outline>
+    <choice id="default"/>
+    <choice id="dev.spacekit.app" visible="false">
+        <pkg-ref id="dev.spacekit.app"/>
+    </choice>
+    <pkg-ref id="dev.spacekit.app" version="@VERSION@" onConclusion="none">SpaceKit-component.pkg</pkg-ref>
+</installer-gui-script>

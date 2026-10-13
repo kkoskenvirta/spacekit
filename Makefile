@@ -20,7 +20,7 @@ endif
 # The background agent's plist. `make uninstall` reads it to see which executable the agent runs.
 AGENT_PLIST ?= $(HOME)/Library/LaunchAgents/dev.spacekit.agent.plist
 
-.PHONY: help build release test app run tui install uninstall lint format validate-rules clean
+.PHONY: help build release test app installer run tui install uninstall lint format validate-rules clean
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -36,6 +36,9 @@ test: ## Run the test suite (includes the safety guarantees)
 
 app: ## Build build/SpaceKit.app (release, ad-hoc signed)
 	scripts/build-app.sh
+
+installer: ## Build build/SpaceKit-<version>.pkg and .dmg (universal; signed and notarized when configured, see docs/RELEASING.md)
+	scripts/build-installer.sh
 
 run: ## Run the app from source
 	$(SWIFT) run $(SWIFT_FLAGS) SpaceKitApp

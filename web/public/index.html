@@ -1,0 +1,476 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SpaceKit: your Mac fills up on its own. Now it cleans up on its own.</title>
+  <meta name="description" content="SpaceKit finds the Xcode builds, node_modules, Docker caches and AI models eating your Mac's disk, and cleans them up on a schedule within strict safety limits. $5, one time.">
+  <meta name="theme-color" content="#08090b">
+  <meta property="og:title" content="SpaceKit: automatic disk cleanup for developers' Macs">
+  <meta property="og:description" content="Cleanup jobs that keep build caches, node_modules and AI models from eating your disk. $5, one time.">
+  <meta property="og:type" content="website">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/main.js" defer></script>
+</head>
+<body>
+
+<header class="nav">
+  <div class="container nav-inner">
+    <a class="brand" href="/"><img src="/favicon.svg" alt="" width="28" height="28">SpaceKit</a>
+    <nav class="nav-links" aria-label="Sections">
+      <a href="#problem">The problem</a>
+      <a href="#automation">Automation</a>
+      <a href="#safety">Safety</a>
+      <a href="#features">Features</a>
+      <a href="#faq">FAQ</a>
+    </nav>
+    <a class="button button-primary" href="/buy">Buy · $5</a>
+  </div>
+</header>
+
+<main>
+
+  <!-- ───────────── Hero ───────────── -->
+  <section class="hero">
+    <div class="container hero-grid">
+      <div>
+        <div class="pill"><span class="pill-dot"></span>Automatic cleanup jobs for macOS</div>
+        <h1>Your Mac fills up on its own.<br><span class="grad">Now it cleans up on its own.</span></h1>
+        <p class="hero-sub">Xcode builds, <code>node_modules</code>, Docker caches and AI models quietly eat hundreds of gigabytes. SpaceKit finds them and clears them on a schedule, so “Your disk is almost full” stops being a weekly event.</p>
+        <div class="hero-cta">
+          <a class="button button-primary button-lg" href="/buy">Buy SpaceKit <span class="price">$5</span></a>
+          <a class="button button-ghost button-lg" href="#automation">See how jobs work</a>
+        </div>
+        <div class="hero-meta">
+          <span><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8.5l3.2 3L13 4.5"/></svg>One-time purchase</span>
+          <span><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8.5l3.2 3L13 4.5"/></svg>macOS 15 or later</span>
+          <span><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8.5l3.2 3L13 4.5"/></svg>Apple silicon &amp; Intel</span>
+          <span><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8.5l3.2 3L13 4.5"/></svg>14-day refund</span>
+        </div>
+      </div>
+
+      <div class="window" role="img" aria-label="Illustration: the disk fills up as builds and downloads add gigabytes, then a scheduled SpaceKit job frees about 70 GB.">
+        <div class="window-bar">
+          <span class="dots"><i></i><i></i><i></i></span>
+          <span class="window-title">SpaceKit · Automation</span>
+        </div>
+        <div class="window-body">
+          <div class="disk-head">
+            <div>
+              <div class="disk-name">Macintosh HD</div>
+              <div class="disk-sub"><b id="disk-used">402 GB</b> of 494 GB used · <span id="disk-free">92 GB</span> free</div>
+            </div>
+            <span class="chip chip-good" id="disk-status">● Healthy</span>
+          </div>
+          <div class="capacity" id="capacity" aria-hidden="true">
+            <span data-key="dev" style="background: var(--c-dev)"></span>
+            <span data-key="ai" style="background: var(--c-ai)"></span>
+            <span data-key="apps" style="background: var(--c-apps)"></span>
+            <span data-key="docs" style="background: var(--c-docs)"></span>
+            <span data-key="other" style="background: var(--c-other)"></span>
+            <span data-key="free" style="background: var(--c-free)"></span>
+          </div>
+          <ul class="legend" aria-hidden="true">
+            <li><span class="swatch" style="background: var(--c-dev)"></span>Developer</li>
+            <li><span class="swatch" style="background: var(--c-ai)"></span>AI models</li>
+            <li><span class="swatch" style="background: var(--c-apps)"></span>Applications</li>
+            <li><span class="swatch" style="background: var(--c-docs)"></span>Documents</li>
+            <li><span class="swatch" style="background: var(--c-other)"></span>System &amp; other</li>
+          </ul>
+          <div class="joblog" id="joblog" aria-hidden="true"></div>
+        </div>
+        <span class="window-note">Illustration</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────────── Tools strip ───────────── -->
+  <div class="strip">
+    <p>Knows where 40+ developer and AI tools hide their gigabytes</p>
+    <div class="marquee" aria-label="Tools SpaceKit recognises">
+      <div class="marquee-track" id="marquee"></div>
+    </div>
+  </div>
+
+  <!-- ───────────── Problem ───────────── -->
+  <section id="problem">
+    <div class="container">
+      <div class="section-head reveal">
+        <div class="eyebrow">The problem</div>
+        <h2>Disk space doesn’t run out.<br>It creeps out.</h2>
+        <p>Nothing on your Mac ever deletes a build cache. Every build, <code>npm install</code>, <code>docker pull</code> and model download leaves gigabytes behind. You don’t notice until the warning arrives, usually mid-build.</p>
+      </div>
+
+      <div class="problem-grid">
+        <div class="panel chart-card reveal">
+          <h3>Used space on a typical developer Mac</h3>
+          <p class="chart-sub">Gigabytes used over the last 12 months, on a 494 GB disk</p>
+          <div class="chart" id="creep-chart"></div>
+          <div class="notif" id="creep-notif" aria-hidden="true">
+            <div class="notif-icon"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#fff" stroke-width="1.6" aria-hidden="true"><rect x="2" y="4" width="12" height="8" rx="1.5"/><path d="M5 9.5h.01M8 9.5h3"/></svg></div>
+            <div><strong>Your disk is almost full</strong>Save space by optimizing storage.</div>
+          </div>
+          <p class="footnote">Example data.</p>
+        </div>
+
+        <div class="panel grew reveal">
+          <h3 style="font-size:15px">What grew this year</h3>
+          <p class="chart-sub" style="font-size:13px;color:var(--text-3);margin-top:4px">None of it is your work. All of it can be rebuilt.</p>
+          <ul id="grew-list"></ul>
+          <div class="grew-total"><span>Lost to tool leftovers</span><b>+245 GB</b></div>
+        </div>
+      </div>
+
+      <div class="pain-points">
+        <div class="panel reveal">
+          <h3>Builds pile up forever</h3>
+          <p>Xcode keeps a <code>DerivedData</code> copy of every project you’ve ever opened. Rust’s <code>target/</code>, Gradle and Flutter do the same.</p>
+        </div>
+        <div class="panel reveal">
+          <h3>Every repo has its own <code>node_modules</code></h3>
+          <p>Clone 40 projects and you have 40 copies of the dependency tree, most of them for code you haven’t touched in months.</p>
+        </div>
+        <div class="panel reveal">
+          <h3>AI models are enormous</h3>
+          <p>One <code>ollama pull</code> or Hugging Face download is several gigabytes. Try a few models and forget about them, and that’s 50 GB gone.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────────── Automation ───────────── -->
+  <section id="automation" class="automation">
+    <div class="container">
+      <div class="section-head reveal">
+        <div class="eyebrow">Automatic cleanup jobs</div>
+        <h2>Set it once.<br>Never think about disk space again.</h2>
+        <p>A job watches one kind of leftover and deals with it on a schedule. A lightweight background agent runs it, even if your Mac was asleep at the scheduled time. You decide how much control to keep.</p>
+      </div>
+
+      <div class="modes">
+        <div class="panel mode reveal">
+          <div class="mode-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg></div>
+          <h3>Observe <code>mode: observe</code></h3>
+          <p>Get a notification when something grows past your limit. Nothing is removed.</p>
+          <div class="example">🔔 Docker build cache passed 20 GB</div>
+        </div>
+        <div class="panel mode reveal">
+          <div class="mode-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 11l3 3 8-8"/><path d="M20 12v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/></svg></div>
+          <h3>Suggest <code>mode: suggest</code></h3>
+          <p>SpaceKit prepares the cleanup and waits. Review the list, then approve it with one click.</p>
+          <div class="example">31 stale node_modules · 18.6 GB · <span style="color:var(--brand-hi)">Approve</span></div>
+        </div>
+        <div class="panel mode mode-featured reveal">
+          <span class="badge">Set &amp; forget</span>
+          <div class="mode-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg></div>
+          <h3>Automatic <code>mode: automatic</code></h3>
+          <p>Cleans regenerable data on schedule, up to a byte budget per run. You’re notified every time, and every removal is logged.</p>
+          <div class="example">✓ Sun 03:00 · DerivedData · freed 41.8 GB</div>
+        </div>
+      </div>
+
+      <!-- Job builder -->
+      <div class="panel builder reveal" id="builder">
+        <div class="builder-controls">
+          <h3>Build a job in ten seconds</h3>
+          <p>Choose what to clean and when. This is the exact config SpaceKit runs.</p>
+
+          <div class="field">
+            <span class="field-label" id="lbl-target">Clean up</span>
+            <div class="seg" role="group" aria-labelledby="lbl-target" data-field="target"></div>
+          </div>
+
+          <div class="field">
+            <span class="field-label" id="lbl-mode">Mode</span>
+            <div class="seg" role="group" aria-labelledby="lbl-mode" data-field="mode"></div>
+          </div>
+
+          <div class="field">
+            <span class="field-label" id="lbl-schedule">Schedule</span>
+            <div class="seg" role="group" aria-labelledby="lbl-schedule" data-field="schedule"></div>
+          </div>
+
+          <div class="field">
+            <label for="size">Only when bigger than <output id="size-out" for="size">30 GB</output></label>
+            <input type="range" id="size" min="5" max="100" step="5" value="30">
+          </div>
+
+          <div class="field" id="age-field">
+            <label for="age"><span id="age-label">Keep projects used within</span> <output id="age-out" for="age">14 days</output></label>
+            <input type="range" id="age" min="7" max="180" step="1" value="14">
+          </div>
+        </div>
+
+        <div class="builder-output">
+          <div class="file-tab">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 1.5h5l3 3v10H4z"/><path d="M9 1.5v3h3"/></svg>
+            ~/.config/spacekit/config.yaml
+            <button class="copy" type="button" id="copy-yaml">Copy</button>
+          </div>
+          <pre class="yaml" id="yaml" aria-live="polite"></pre>
+          <div class="plain">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+            <p id="plain"></p>
+          </div>
+        </div>
+      </div>
+
+      <!-- With / without -->
+      <div class="compare">
+        <div class="panel chart-card reveal">
+          <h3>Same Mac, same year, with cleanup jobs</h3>
+          <p class="chart-sub">Used space by week. Jobs remove regenerable leftovers; your own files keep growing as usual.</p>
+          <ul class="legend legend-row">
+            <li><span class="swatch swatch-line" style="background: #8a919c"></span>Without SpaceKit</li>
+            <li><span class="swatch swatch-line" style="background: var(--c-dev)"></span>With cleanup jobs</li>
+            <li><span class="swatch swatch-line" style="background: var(--critical)"></span>Disk capacity</li>
+          </ul>
+          <div class="chart" id="compare-chart"></div>
+          <p class="footnote">Example data.</p>
+        </div>
+        <div class="stats">
+          <div class="panel stat reveal">
+            <div class="stat-label">Free space after 12 months</div>
+            <div class="stat-value" style="color: var(--c-dev)" id="stat-with">—</div>
+            <div class="stat-note" id="stat-without">—</div>
+          </div>
+          <div class="panel stat reveal">
+            <div class="stat-label">Time you spend on it</div>
+            <div class="stat-value">0 min</div>
+            <div class="stat-note">Jobs run in the background. You get a notification when something was cleaned.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────────── Safety ───────────── -->
+  <section id="safety">
+    <div class="container">
+      <div class="section-head reveal">
+        <div class="eyebrow">Safety first</div>
+        <h2>Ruthless with caches.<br>Paranoid about your files.</h2>
+        <p>Automatic deletion is only useful if you can trust it. Every removal, from every part of SpaceKit, goes through one safety guard that checks each item again just before acting on it.</p>
+      </div>
+
+      <div class="safety-grid">
+        <div class="panel tiers reveal">
+          <div class="tier tier-safe">
+            <div class="tier-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg></div>
+            <h3>Regenerable <small>DerivedData · node_modules · caches</small></h3>
+            <p>Rebuilt automatically the next time you need it. Automatic jobs only touch this tier unless you opt in to more.</p>
+          </div>
+          <div class="tier tier-review">
+            <div class="tier-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 7v6M12 17h.01"/></svg></div>
+            <h3>Review <small>AI models · simulators · old SDKs</small></h3>
+            <p>Takes time or bandwidth to get back. SpaceKit shows when you last used it and asks before removing it.</p>
+          </div>
+          <div class="tier tier-protected">
+            <div class="tier-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div>
+            <h3>Don’t touch <small>repos · keys · documents</small></h3>
+            <p>Your git repositories, SSH keys, credentials, home and personal folders. SpaceKit refuses to remove them, full stop.</p>
+          </div>
+        </div>
+
+        <div class="guarantees reveal">
+          <div>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg>
+            <h3>Trash first</h3>
+            <p>By default everything goes to the Trash, so you can put it back.</p>
+          </div>
+          <div>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a9 9 0 1 0 9 9"/><path d="M12 12l6-6"/></svg>
+            <h3>Byte budget</h3>
+            <p>An automatic run never removes more than your limit (100 GB by default).</p>
+          </div>
+          <div>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>
+            <h3>Preview, with reasons</h3>
+            <p>Every manual cleanup shows each item and the guard’s verdict before anything happens.</p>
+          </div>
+          <div>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h16v16H4z"/><path d="M8 9h8M8 13h8M8 17h5"/></svg>
+            <h3>Full journal</h3>
+            <p>Everything SpaceKit ever removed is logged: what, when, how big and which job.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────────── Features ───────────── -->
+  <section id="features" style="padding-top: 40px">
+    <div class="container">
+      <div class="section-head reveal">
+        <div class="eyebrow">Everything else</div>
+        <h2>See where every gigabyte went.</h2>
+        <p>Cleanup jobs are the main event, but SpaceKit also gives you a full, fast picture of your disk, including the hidden folders.</p>
+      </div>
+
+      <div class="bento">
+        <div class="panel span-4 explore-card reveal">
+          <div>
+            <h3>Explore the whole disk</h3>
+            <p>An interactive sector map or treemap of everything, hidden folders included. Zoom into any slice; every folder SpaceKit recognises is labelled with what it is and whether it’s safe to remove.</p>
+            <ul class="legend" style="margin-top:18px">
+              <li><span class="swatch" style="background: var(--c-dev)"></span>Developer</li>
+              <li><span class="swatch" style="background: var(--c-apps)"></span>Applications</li>
+              <li><span class="swatch" style="background: var(--c-ai)"></span>AI</li>
+              <li><span class="swatch" style="background: var(--c-docs)"></span>Documents</li>
+              <li><span class="swatch" style="background: var(--c-other)"></span>Other</li>
+            </ul>
+          </div>
+          <svg class="sunburst" id="sunburst" viewBox="-120 -120 240 240" aria-hidden="true"></svg>
+        </div>
+
+        <div class="panel span-2 reveal">
+          <h3>Storage history</h3>
+          <p>Used space over time, and exactly what grew.</p>
+          <div class="big-number">+73 GB<small>this month</small></div>
+          <svg class="spark" viewBox="0 0 200 56" preserveAspectRatio="none" aria-hidden="true">
+            <path d="M0 48 L20 46 L40 44 L60 45 L80 38 L100 36 L120 30 L140 27 L160 20 L180 14 L200 8" fill="none" stroke="var(--c-dev)" stroke-width="2" vector-effect="non-scaling-stroke"/>
+          </svg>
+        </div>
+
+        <div class="panel span-3 reveal">
+          <h3>Dev Intelligence</h3>
+          <p>Xcode, Node, pnpm, Bun, Python, Rust, Go, Gradle, Android, Flutter, Docker, Homebrew, editors and unused git worktrees, sorted by how safe they are to remove.</p>
+          <div class="rows">
+            <div><span class="dot" style="background: var(--c-dev)"></span>Xcode DerivedData <span class="size"><span class="tag tag-safe">Regenerable</span> 48.2 GB</span></div>
+            <div><span class="dot" style="background: var(--c-dev)"></span>node_modules · 31 projects <span class="size"><span class="tag tag-safe">Regenerable</span> 18.6 GB</span></div>
+            <div><span class="dot" style="background: var(--c-ai)"></span>Ollama · idle 97 days <span class="size"><span class="tag tag-review">Review</span> 12.4 GB</span></div>
+            <div><span class="dot" style="background: var(--c-other)"></span>~/.ssh <span class="size"><span class="tag tag-protected">Don’t touch</span> 24 KB</span></div>
+          </div>
+        </div>
+
+        <div class="panel span-3 reveal">
+          <h3>CLI and terminal UI included</h3>
+          <p>Everything the app does, scriptable. Same engine, same config, with JSON output for your own tooling.</p>
+          <div class="terminal"><span class="p">$</span> <span class="w">spacekit dev</span>
+<span class="g">🟢</span> Xcode DerivedData          <span class="w">48.2 GB</span>  23 projects
+<span class="g">🟢</span> node_modules               <span class="w">18.6 GB</span>  31 projects
+<span class="g">🟢</span> Cargo target folders       <span class="w">11.3 GB</span>   6 projects
+<span class="y">🟡</span> iOS Simulator runtimes     <span class="w">14.9 GB</span>   3 runtimes
+<span class="p">$</span> <span class="w">spacekit clean --safety safe</span></div>
+        </div>
+
+        <div class="panel span-3 reveal">
+          <h3>Local AI, under control</h3>
+          <p>Ollama, Hugging Face, LM Studio, PyTorch and Whisper models, plus AI coding tools’ session data. See which models you actually use and which have sat idle for 90+ days.</p>
+        </div>
+
+        <div class="panel span-3 reveal">
+          <h3>171 storage rules, in plain YAML</h3>
+          <p>The rule library knows where each tool keeps its data and how to rebuild it. Add your own rule in a few lines, or keep the config in your dotfiles.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────────── Pricing ───────────── -->
+  <section id="buy" class="pricing">
+    <div class="container">
+      <div class="section-head center reveal">
+        <div class="eyebrow">Get SpaceKit</div>
+        <h2>Less than a coffee.<br>Gives back gigabytes.</h2>
+      </div>
+
+      <div class="panel price-card reveal">
+        <div class="price-top">
+          <div>
+            <h3><img src="/favicon.svg" alt="" width="32" height="32">SpaceKit for Mac</h3>
+            <p class="tagline">Pay once and it’s yours.</p>
+          </div>
+          <div class="amount">$5<small>USD</small></div>
+        </div>
+        <ul class="includes">
+          <li><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8.5l3.2 3L13 4.5"/></svg>Automatic cleanup jobs</li>
+          <li><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8.5l3.2 3L13 4.5"/></svg>Native Mac app</li>
+          <li><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8.5l3.2 3L13 4.5"/></svg>Whole-disk explorer</li>
+          <li><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8.5l3.2 3L13 4.5"/></svg>CLI and terminal UI</li>
+          <li><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8.5l3.2 3L13 4.5"/></svg>171 built-in storage rules</li>
+          <li><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8.5l3.2 3L13 4.5"/></svg>Storage history</li>
+          <li><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8.5l3.2 3L13 4.5"/></svg>Signed &amp; notarized installer</li>
+          <li><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8.5l3.2 3L13 4.5"/></svg>Apple silicon &amp; Intel</li>
+        </ul>
+        <a class="button button-primary button-lg" href="/buy">Buy SpaceKit for $5</a>
+        <div class="secure">
+          <span><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>Secure checkout by Stripe</span>
+          <span>Instant download</span>
+          <span><a href="/refunds" style="color:inherit">14-day money-back guarantee</a></span>
+        </div>
+        <p class="price-fine">One-time payment of $5.00 USD; any VAT or sales tax due is added at checkout. By buying you agree to the <a href="/terms">Terms of Sale</a>.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────────── FAQ ───────────── -->
+  <section id="faq" style="padding-top: 40px">
+    <div class="container">
+      <div class="section-head center reveal">
+        <div class="eyebrow">FAQ</div>
+        <h2>Questions</h2>
+      </div>
+      <div class="faq">
+        <details>
+          <summary>Could an automatic job delete something I need?</summary>
+          <p>Automatic jobs only remove data a rule recognises as regenerable, such as build output and package caches, unless you explicitly opt a job in to more. They never touch your home or personal folders, system folders, credentials or git repositories, and they stay under a per-run byte budget. By default everything goes to the Trash, and every removal is journaled.</p>
+        </details>
+        <details>
+          <summary>What happens after I pay?</summary>
+          <p>Stripe takes you straight back to a download page with the installer. Open it, follow the steps, and SpaceKit lands in your Applications folder with the <code>spacekit</code> command-line tool on your PATH. Stripe also emails you a receipt. Bookmark the download page to download again later.</p>
+        </details>
+        <details>
+          <summary>Can I get a refund?</summary>
+          <p>Yes. If SpaceKit isn’t right for you, email <a href="mailto:{{SUPPORT_EMAIL}}">{{SUPPORT_EMAIL}}</a> within 14 days and we’ll refund you in full, no questions asked. See the <a href="/refunds">Refund Policy</a>.</p>
+        </details>
+        <details>
+          <summary>Is it a subscription?</summary>
+          <p>No. You pay $5 once (plus any tax due where you live). Nothing renews and there’s no account to manage.</p>
+        </details>
+        <details>
+          <summary>Which Macs does it run on?</summary>
+          <p>Any Mac running macOS 15 Sequoia or later, with Apple silicon or Intel.</p>
+        </details>
+        <details>
+          <summary>Does it need Full Disk Access?</summary>
+          <p>It works without it, but macOS then hides some apps’ data (Mail, Messages and so on) and SpaceKit reports that space as “Hidden”. For the complete picture, grant Full Disk Access in System Settings → Privacy &amp; Security.</p>
+        </details>
+        <details>
+          <summary>Does the background agent slow my Mac down?</summary>
+          <p>No. It’s a small per-user launchd job that wakes up periodically (hourly by default), runs any jobs that are due and goes back to sleep. If your Mac was asleep at the scheduled time, the job runs at the next check.</p>
+        </details>
+        <details>
+          <summary>Can I use it from the terminal?</summary>
+          <p>Yes. The <code>spacekit</code> CLI and the full-screen terminal UI (<code>spacekit tui</code>) are included, and they share one YAML config with the app. Most commands take <code>--json</code> for scripting.</p>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <section class="final">
+    <div class="container reveal">
+      <h2>Stop babysitting your disk.</h2>
+      <p>Set up a cleanup job once, and SpaceKit keeps the gigabytes coming back every week.</p>
+      <a class="button button-primary button-lg" href="/buy">Buy SpaceKit <span class="price">$5</span></a>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="container footer-inner">
+    <a class="brand" href="/" style="font-size:14px"><img src="/favicon.svg" alt="" width="20" height="20">SpaceKit</a>
+    <span>© 2026 {{BUSINESS_NAME}}</span>
+    <nav aria-label="Footer">
+      <a href="/terms">Terms</a>
+      <a href="/privacy">Privacy</a>
+      <a href="/refunds">Refunds</a>
+      <a href="mailto:{{SUPPORT_EMAIL}}">Contact</a>
+    </nav>
+    <div class="footer-company">SpaceKit is sold by {{BUSINESS_NAME}} · Business ID {{BUSINESS_ID}} · {{BUSINESS_ADDRESS}} · <a href="mailto:{{SUPPORT_EMAIL}}">{{SUPPORT_EMAIL}}</a></div>
+  </div>
+</footer>
+
+</body>
+</html>

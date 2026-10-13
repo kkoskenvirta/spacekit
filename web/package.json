@@ -1,0 +1,14 @@
+{
+  "name": "spacekit-web",
+  "private": true,
+  "description": "The SpaceKit website: marketing page, Stripe checkout and the paid download",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node dev.mjs",
+    "test": "node --test test/*.test.mjs"
+  }
+}

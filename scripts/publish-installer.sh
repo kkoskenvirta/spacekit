@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Uploads the installer to the website's downloads volume, where buyers download it from. The site serves
+# the newest .pkg there, so publishing a new version is just uploading it.
+#
+#   DEPLOY_TARGET=root@my-server:/var/lib/docker/volumes/<volume>/_data/downloads scripts/publish-installer.sh
+#
+# Build and notarize it first (scripts/build-installer.sh). Setup: web/README.md.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+VERSION="${VERSION:-$(grep -m1 'static let version' Sources/SpaceKitCLI/SpaceKitCommand.swift | sed -E 's/.*"(.*)".*/\1/')}"
+PKG="build/SpaceKit-$VERSION.pkg"
+: "${DEPLOY_TARGET:?Set DEPLOY_TARGET=user@host:/path/to/downloads (see web/README.md)}"
+
+[ -f "$PKG" ] || { echo "✗ $PKG doesn't exist. Run scripts/build-installer.sh first." >&2; exit 1; }
+if ! xcrun stapler validate "$PKG" >/dev/null 2>&1; then
+  echo "✗ $PKG isn't notarized, so buyers' Macs would refuse to open it. Build it with signing and notarization (docs/RELEASING.md)." >&2
+  [ "${ALLOW_UNNOTARIZED:-}" = 1 ] || exit 1
+fi
+
+HOST="${DEPLOY_TARGET%%:*}"
+DIR="${DEPLOY_TARGET#*:}"
+echo "→ Uploading $(basename "$PKG") to $DEPLOY_TARGET"
+ssh "$HOST" "mkdir -p '$DIR'"
+# Upload under a temporary name and rename, so nobody downloads a half-copied file.
+scp "$PKG" "$HOST:$DIR/.upload-$(basename "$PKG")"
+ssh "$HOST" "chmod 644 '$DIR/.upload-$(basename "$PKG")' && mv '$DIR/.upload-$(basename "$PKG")' '$DIR/$(basename "$PKG")'"
+echo "✓ Published. Check https://<your-domain>/healthz: it names the installer buyers get."
